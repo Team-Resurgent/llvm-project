@@ -4450,6 +4450,20 @@ SDValue PPCTargetLowering::extendArgForPPC64(ISD::ArgFlagsTy Flags,
   return DAG.getNode(ISD::TRUNCATE, dl, ObjectVT, ArgVal);
 }
 
+/// Vector registers used to pass arguments under the 64-bit ABIs. The ELF ABIs
+/// begin at v2; the Xbox 360 begins at v1.
+static ArrayRef<MCPhysReg> getVRArgRegs(const PPCSubtarget &Subtarget) {
+  static const MCPhysReg VR_ELF[] = {
+    PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
+    PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
+  };
+  static const MCPhysReg VR_Xbox360[] = {
+    PPC::V1, PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7,
+    PPC::V8, PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
+  };
+  return Subtarget.isXbox360ABI() ? ArrayRef(VR_Xbox360) : ArrayRef(VR_ELF);
+}
+
 SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
     SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
@@ -4476,14 +4490,11 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-  static const MCPhysReg VR[] = {
-    PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
-    PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
-  };
+  const ArrayRef<MCPhysReg> VR = getVRArgRegs(Subtarget);
 
   const unsigned Num_GPR_Regs = std::size(GPR);
   const unsigned Num_FPR_Regs = useSoftFloat() ? 0 : 13;
-  const unsigned Num_VR_Regs = std::size(VR);
+  const unsigned Num_VR_Regs = VR.size();
 
   // Do a first pass over the arguments to determine whether the ABI
   // guarantees that our caller has allocated the parameter save area
@@ -4491,7 +4502,8 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
   // in the ELFv2 ABI, it is true if this is a vararg function or if
   // any parameter is located in a stack slot.
 
-  bool HasParameterArea = !isELFv2ABI || isVarArg;
+  bool HasParameterArea =
+      !isELFv2ABI || isVarArg || Subtarget.isXbox360ABI();
   unsigned ParamAreaSize = Num_GPR_Regs * PtrByteSize;
   unsigned NumBytes = LinkageSize;
   unsigned AvailableFPRs = Num_FPR_Regs;
@@ -4934,14 +4946,11 @@ needStackSlotPassParameters(const PPCSubtarget &Subtarget,
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-  static const MCPhysReg VR[] = {
-    PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
-    PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
-  };
+  const ArrayRef<MCPhysReg> VR = getVRArgRegs(Subtarget);
 
   const unsigned NumGPRs = std::size(GPR);
   const unsigned NumFPRs = 13;
-  const unsigned NumVRs = std::size(VR);
+  const unsigned NumVRs = VR.size();
   const unsigned ParamAreaSize = NumGPRs * PtrByteSize;
 
   unsigned NumBytes = LinkageSize;
@@ -6257,20 +6266,18 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-  static const MCPhysReg VR[] = {
-    PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
-    PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
-  };
+  const ArrayRef<MCPhysReg> VR = getVRArgRegs(Subtarget);
 
   const unsigned NumGPRs = std::size(GPR);
   const unsigned NumFPRs = useSoftFloat() ? 0 : 13;
-  const unsigned NumVRs = std::size(VR);
+  const unsigned NumVRs = VR.size();
 
   // On ELFv2, we can avoid allocating the parameter area if all the arguments
   // can be passed to the callee in registers.
   // For the fast calling convention, there is another check below.
   // Note: We should keep consistent with LowerFormalArguments_64SVR4()
-  bool HasParameterArea = !isELFv2ABI || CFlags.IsVarArg || IsFastCall;
+  bool HasParameterArea =
+      !isELFv2ABI || CFlags.IsVarArg || IsFastCall || Subtarget.isXbox360ABI();
   if (!HasParameterArea) {
     unsigned ParamAreaSize = NumGPRs * PtrByteSize;
     unsigned AvailableFPRs = NumFPRs;
@@ -6291,7 +6298,7 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
 
   // Avoid allocating parameter area for fastcc functions if all the arguments
   // can be passed in the registers.
-  if (IsFastCall)
+  if (IsFastCall && !Subtarget.isXbox360ABI())
     HasParameterArea = false;
 
   // Add up all the space actually used.

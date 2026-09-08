@@ -41,6 +41,8 @@ EnablePEVectorSpills("ppc-enable-pe-vector-spills",
                      cl::init(false), cl::Hidden);
 
 static unsigned computeReturnSaveOffset(const PPCSubtarget &STI) {
+  if (STI.isXbox360ABI())
+    return -8U;
   if (STI.isAIXABI())
     return STI.isPPC64() ? 16 : 8;
   // SVR4 ABI:
