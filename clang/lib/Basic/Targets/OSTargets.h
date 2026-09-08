@@ -578,6 +578,33 @@ public:
   }
 };
 
+// Xbox 360 (Xenon) target. Like the PS3, a 64-bit PowerPC machine addressed
+// with 32-bit pointers.
+template <typename Target>
+class LLVM_LIBRARY_VISIBILITY Xbox360TargetInfo : public OSTargetInfo<Target> {
+protected:
+  void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
+                    MacroBuilder &Builder) const override {
+    // _M_PPCBE is predefined by the platform compiler; the Xbox 360 headers
+    // test it. _XBOX and _XBOX_VER come from the build system, as they do
+    // with the platform toolchain, and are not defined here.
+    Builder.defineMacro("_M_PPCBE");
+    Builder.defineMacro("_ARCH_PPC64");
+    Builder.defineMacro("__powerpc64__");
+  }
+
+public:
+  Xbox360TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
+      : OSTargetInfo<Target>(Triple, Opts) {
+    this->LongWidth = this->LongAlign = 32;
+    this->PointerWidth = this->PointerAlign = 32;
+    this->IntMaxType = TargetInfo::SignedLongLong;
+    this->Int64Type = TargetInfo::SignedLongLong;
+    this->SizeType = TargetInfo::UnsignedInt;
+    this->resetDataLayout();
+  }
+};
+
 // Common base class for PS4/PS5 targets.
 template <typename Target>
 class LLVM_LIBRARY_VISIBILITY PSOSTargetInfo : public OSTargetInfo<Target> {
