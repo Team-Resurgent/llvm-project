@@ -202,6 +202,12 @@ static PPCTargetMachine::PPCABI computeTargetABI(const Triple &TT,
   assert(Options.MCOptions.getABIName().empty() &&
          "Unknown target-abi option!");
 
+  // The Xbox 360 has neither function descriptors nor a TOC, so it presents as
+  // ELFv2 for those purposes. Its linkage area size and its rule that the
+  // parameter save area is always allocated are handled separately.
+  if (TT.getOS() == Triple::Xbox360)
+    return PPCTargetMachine::PPC_ABI_ELFv2;
+
   switch (TT.getArch()) {
   case Triple::ppc64le:
     return PPCTargetMachine::PPC_ABI_ELFv2;

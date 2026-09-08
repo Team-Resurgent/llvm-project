@@ -386,7 +386,8 @@ BitVector PPCRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
     // no constant-pool loads, etc.) and we have no potential uses inside an
     // inline asm block, then we can treat r2 has an ordinary callee-saved
     // register.
-    if (!TM.isPPC64() || UsesTOCBasePtr || MF.hasInlineAsm())
+    if (!TM.isPPC64() || UsesTOCBasePtr || MF.hasInlineAsm() ||
+        Subtarget.isXbox360ABI())
       markSuperRegs(Reserved, PPC::R2); // System-reserved register.
 
     if (Subtarget.isSVR4ABI())
