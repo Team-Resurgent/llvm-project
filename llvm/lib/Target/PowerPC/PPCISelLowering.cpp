@@ -3952,7 +3952,7 @@ SDValue PPCTargetLowering::LowerINIT_TRAMPOLINE(SDValue Op,
     return TokenFactor;
   }
 
-  bool isPPC64 = (PtrVT == MVT::i64);
+  bool isPPC64 = Subtarget.isPPC64();
   Type *IntPtrTy = DAG.getDataLayout().getIntPtrType(*DAG.getContext());
 
   TargetLowering::ArgListTy Args;
@@ -19216,7 +19216,7 @@ SDValue PPCTargetLowering::LowerFRAMEADDR(SDValue Op,
   MFI.setFrameAddressIsTaken(true);
 
   EVT PtrVT = getPointerTy(MF.getDataLayout());
-  bool isPPC64 = PtrVT == MVT::i64;
+  bool isPPC64 = Subtarget.isPPC64();
 
   // Naked functions never have a frame pointer, and so we use r1. For all
   // other functions, this decision must be delayed until during PEI.
