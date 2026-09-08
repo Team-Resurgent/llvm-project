@@ -62,6 +62,79 @@ static bool CC_PPC32_SVR4_Custom_Dummy(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
   return true;
 }
 
+/// The Xbox 360 (Xenon) argument convention.
+///
+/// Arguments occupy positional slots. Each non-vector argument consumes one
+/// 8-byte slot in the parameter save area, whether or not it is passed in a
+/// register, so the callee can spill its incoming registers into the caller's
+/// frame. Slot N is register GPR[N] for integers and FPR[N] for floating
+/// point, which means a floating-point argument skips the general purpose
+/// register sharing its slot. Vector arguments take a vector register and do
+/// not consume a positional slot at all. Values narrower than a slot sit in
+/// its low-order end, this being a big-endian target.
+bool llvm::CC_PPC32_Xbox360(unsigned ValNo, MVT ValVT, MVT LocVT,
+                            CCValAssign::LocInfo LocInfo,
+                            ISD::ArgFlagsTy ArgFlags, Type *OrigTy,
+                            CCState &State) {
+  static const MCPhysReg GPRs[] = {PPC::R3, PPC::R4, PPC::R5,  PPC::R6,
+                                   PPC::R7, PPC::R8, PPC::R9,  PPC::R10};
+  static const MCPhysReg FPRs[] = {PPC::F1, PPC::F2,  PPC::F3,  PPC::F4,
+                                   PPC::F5, PPC::F6,  PPC::F7,  PPC::F8,
+                                   PPC::F9, PPC::F10, PPC::F11, PPC::F12,
+                                   PPC::F13};
+  static const MCPhysReg VRs[] = {PPC::V1, PPC::V2,  PPC::V3,  PPC::V4,
+                                  PPC::V5, PPC::V6,  PPC::V7,  PPC::V8,
+                                  PPC::V9, PPC::V10, PPC::V11, PPC::V12,
+                                  PPC::V13};
+  const unsigned SlotSize = 8;
+
+  if (LocVT.isVector()) {
+    if (MCRegister Reg = State.AllocateReg(VRs)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+    unsigned Offset = State.AllocateStack(16, Align(16));
+    State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+    return false;
+  }
+
+  const PPCSubtarget &Subtarget =
+      State.getMachineFunction().getSubtarget<PPCSubtarget>();
+  const unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
+
+  // Claim this argument's slot. The caller pre-allocated the linkage area, so
+  // the first argument's slot begins at LinkageSize.
+  unsigned Offset = State.AllocateStack(SlotSize, Align(SlotSize));
+  unsigned Slot = (Offset - LinkageSize) / SlotSize;
+
+  bool IsFloat = LocVT == MVT::f32 || LocVT == MVT::f64;
+  if (IsFloat) {
+    // Floating-point registers are handed out in sequence, independently of
+    // which positional slot the argument occupies; the slot's general purpose
+    // register is consumed either way.
+    if (MCRegister Reg = State.AllocateReg(FPRs)) {
+      if (Slot < std::size(GPRs))
+        State.AllocateReg(GPRs[Slot]);
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+  if (!IsFloat && Slot < std::size(GPRs)) {
+    State.AllocateReg(GPRs[Slot]);
+    State.addLoc(
+        CCValAssign::getReg(ValNo, ValVT, GPRs[Slot], LocVT, LocInfo));
+    return false;
+  }
+
+  // Passed in memory. A value narrower than the slot occupies its low-order
+  // end.
+  unsigned Size = LocVT.getStoreSize();
+  if (Size < SlotSize)
+    Offset += SlotSize - Size;
+  State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+  return false;
+}
+
 static bool CC_PPC32_SVR4_Custom_AlignArgRegs(unsigned &ValNo, MVT &ValVT,
                                               MVT &LocVT,
                                               CCValAssign::LocInfo &LocInfo,

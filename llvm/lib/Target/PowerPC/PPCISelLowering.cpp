@@ -4244,7 +4244,8 @@ SDValue PPCTargetLowering::LowerFormalArguments_32SVR4(
   // Reserve space for the linkage area on the stack.
   unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
   CCInfo.AllocateStack(LinkageSize, PtrAlign);
-  CCInfo.AnalyzeFormalArguments(Ins, CC_PPC32_SVR4);
+  CCInfo.AnalyzeFormalArguments(Ins, Subtarget.isXbox360ABI() ? CC_PPC32_Xbox360
+                                                             : CC_PPC32_SVR4);
 
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
@@ -6026,7 +6027,11 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
       ISD::ArgFlagsTy ArgFlags = Outs[i].Flags;
       bool Result;
 
-      if (!ArgFlags.isVarArg()) {
+      if (Subtarget.isXbox360ABI()) {
+        // Named and unnamed arguments are placed identically.
+        Result = CC_PPC32_Xbox360(i, ArgVT, ArgVT, CCValAssign::Full, ArgFlags,
+                                  Outs[i].OrigTy, CCInfo);
+      } else if (!ArgFlags.isVarArg()) {
         Result = CC_PPC32_SVR4(i, ArgVT, ArgVT, CCValAssign::Full, ArgFlags,
                                Outs[i].OrigTy, CCInfo);
       } else {
@@ -6044,7 +6049,8 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
     }
   } else {
     // All arguments are treated the same.
-    CCInfo.AnalyzeCallOperands(Outs, CC_PPC32_SVR4);
+    CCInfo.AnalyzeCallOperands(Outs, Subtarget.isXbox360ABI() ? CC_PPC32_Xbox360
+                                                              : CC_PPC32_SVR4);
   }
 
   // Assign locations to all of the outgoing aggregate by value arguments.
@@ -6060,6 +6066,14 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
   // space variable where copies of aggregates which are passed by value are
   // stored.
   unsigned NumBytes = CCByValInfo.getStackSize();
+
+  // Xbox 360 callees spill their incoming register arguments into the caller's
+  // parameter save area, so the caller must always reserve the whole of it
+  // whether or not it passes that many arguments.
+  if (Subtarget.isXbox360ABI()) {
+    const unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
+    NumBytes = std::max(NumBytes, LinkageSize + 8 * 8);
+  }
 
   // Calculate by how many bytes the stack has to be adjusted in case of tail
   // call optimization.

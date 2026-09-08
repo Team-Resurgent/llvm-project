@@ -260,7 +260,7 @@ PPCRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   }
   if (Subtarget.pairedVectorMemops())
     return CSR_SVR432_VSRP_SaveList;
-  if (Subtarget.hasAltivec())
+  if (Subtarget.hasAltivec() && !Subtarget.isXbox360ABI())
     return CSR_SVR432_Altivec_SaveList;
   else if (Subtarget.hasSPE()) {
     if (TM.isPositionIndependent() && !TM.isPPC64())
@@ -329,7 +329,7 @@ PPCRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   else
     return Subtarget.pairedVectorMemops()
                ? CSR_SVR432_VSRP_RegMask
-               : (Subtarget.hasAltivec()
+               : ((Subtarget.hasAltivec() && !Subtarget.isXbox360ABI())
                       ? CSR_SVR432_Altivec_RegMask
                       : (Subtarget.hasSPE()
                              ? (TM.isPositionIndependent()
