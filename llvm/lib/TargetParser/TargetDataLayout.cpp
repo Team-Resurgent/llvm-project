@@ -218,9 +218,9 @@ static std::string computePowerDataLayout(const Triple &T, StringRef ABIName) {
 
   Ret += getManglingComponent(T);
 
-  // PPC32 has 32 bit pointers. The PS3 (OS Lv2) is a PPC64 machine with 32 bit
-  // pointers.
-  if (!is64Bit || T.getOS() == Triple::Lv2)
+  // PPC32 has 32 bit pointers. The PS3 (OS Lv2) and the Xbox 360 (Xenon) are
+  // PPC64 machines with 32 bit pointers.
+  if (!is64Bit || T.getOS() == Triple::Lv2 || T.getOS() == Triple::Xbox360)
     Ret += "-p:32:32";
 
   // If the target ABI uses function descriptors, then the alignment of function

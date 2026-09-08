@@ -59,6 +59,11 @@ static unsigned computeFramePointerSaveOffset(const PPCSubtarget &STI) {
 }
 
 static unsigned computeLinkageSize(const PPCSubtarget &STI) {
+  // The Xbox 360 reserves two doublewords of linkage area; the parameter save
+  // area therefore begins at r1+0x10.
+  if (STI.isXbox360ABI())
+    return 16;
+
   if (STI.isAIXABI() || STI.isPPC64())
     return (STI.isELFv2ABI() ? 4 : 6) * (STI.isPPC64() ? 8 : 4);
 

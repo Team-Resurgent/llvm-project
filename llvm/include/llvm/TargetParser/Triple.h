@@ -349,7 +349,8 @@ public:
     Firmware,
     QURT,
     H2,
-    LastOSType = H2
+    Xbox360, // Microsoft Xbox 360 (Xenon)
+    LastOSType = Xbox360
   };
   enum EnvironmentType {
     UnknownEnvironment,

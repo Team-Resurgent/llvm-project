@@ -205,6 +205,14 @@ public:
   bool isTargetLinux() const { return getTargetTriple().isOSLinux(); }
 
   bool isAIXABI() const { return getTargetTriple().isOSAIX(); }
+
+  /// The Xbox 360 (Xenon) ABI: 64-bit PowerPC parameter passing with a 32-bit
+  /// data model. Shares the 64-bit lowering path but uses its own linkage
+  /// area size, vector argument registers and callee-saved sets.
+  bool isXbox360ABI() const {
+    return getTargetTriple().getOS() == Triple::Xbox360;
+  }
+
   bool isSVR4ABI() const { return !isAIXABI(); }
   bool isELFv2ABI() const;
 
