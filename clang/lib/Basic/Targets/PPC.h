@@ -83,6 +83,15 @@ public:
     SuitableAlign = 128;
     LongDoubleWidth = LongDoubleAlign = 128;
     LongDoubleFormat = &llvm::APFloat::PPCDoubleDouble();
+    // MSVC -- and so the Xbox 360 XDK's cl.exe -- makes `long double` identical
+    // to `double` (64-bit IEEE). Match the platform compiler on that target: it
+    // is the ABI the shipped XDK libraries were built with, and it avoids the
+    // 128-bit IBM double-double soft-float (__gcc_qadd/__floatditf ...) we do
+    // not provide. adjust() preserves an explicitly-chosen IEEEdouble format.
+    if (Triple.getOS() == llvm::Triple::Xbox360) {
+      LongDoubleWidth = LongDoubleAlign = 64;
+      LongDoubleFormat = &llvm::APFloat::IEEEdouble();
+    }
     HasStrictFP = true;
     HasIbm128 = true;
     HasUnalignedAccess = true;
