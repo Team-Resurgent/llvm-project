@@ -2431,6 +2431,18 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, Register SrcReg,
   if (DisableCmpOpt)
     return false;
 
+  // The Xbox 360 (Xenon) miscompiles with this compare-to-record-form
+  // optimization enabled: it turns "compare + branch" into record-form (dot)
+  // instructions and rewrites the branch predicates, and while each rewrite
+  // looks individually correct, the result changes program behaviour (found in
+  // picolibc's vfprintf float branch -- %f/%g emitted nothing past the
+  // conversion). Bisecting the backend passes pinned it to this optimization
+  // (equivalent to -disable-ppc-cmp-opt), which is the same subtle-CR0 hazard
+  // its own comment below warns about. Disable it for that target until the
+  // exact defective substitution is isolated.
+  if (Subtarget.isXbox360ABI())
+    return false;
+
   int OpC = CmpInstr.getOpcode();
   Register CRReg = CmpInstr.getOperand(0).getReg();
 
