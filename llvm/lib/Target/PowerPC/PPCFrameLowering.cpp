@@ -2044,6 +2044,22 @@ void PPCFrameLowering::determineCalleeSaves(MachineFunction &MF,
     FI->setPICBasePointerSaveIndex(PBPSI);
   }
 
+  // Xbox 360 stores the return address (LR) at CallerSP-8 -- inside this
+  // function's own negative frame region rather than in the caller's frame
+  // (SVR4) or a positive linkage slot (AIX). Reserve that slot as a fixed stack
+  // object so PrologEpilogInserter never lays an ordinary local (for example a
+  // varargs va_list) on top of the LR slot; otherwise the store to that local
+  // clobbers the saved return address and the function returns to a garbage
+  // (stack) address. The LowerBound-=8 in processFunctionBeforeFrameFinalized
+  // only keeps the callee-saved GPR/FPR areas off this slot, not the generic
+  // locals allocated by PEI.
+  if (Subtarget.isXbox360ABI() && FI->mustSaveLR() &&
+      !FI->getReturnAddrSaveIndex()) {
+    int LROffset = getReturnSaveOffset();
+    int RASI = MFI.CreateFixedObject(isPPC64 ? 8 : 4, LROffset, true);
+    FI->setReturnAddrSaveIndex(RASI);
+  }
+
   // Make sure we don't explicitly spill r31, because, for example, we have
   // some inline asm which explicitly clobbers it, when we otherwise have a
   // frame pointer and are using r31's spill slot for the prologue/epilogue
