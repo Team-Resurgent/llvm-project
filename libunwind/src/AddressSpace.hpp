@@ -538,6 +538,50 @@ inline bool LocalAddressSpace::findUnwindSections(
   // Bare metal is statically linked, so no need to ask the dynamic loader
   info.dwarf_section_length = (size_t)(&__eh_frame_end - &__eh_frame_start);
   info.dwarf_section =        (uintptr_t)(&__eh_frame_start);
+  // RXDK-360 (Xbox 360 XEX, PE/COFF, big-endian PPC): the __eh_frame_start /
+  // __eh_frame_end bracket markers do NOT reliably enclose the whole merged
+  // .eh_frame under lld -- it lays out the directly-linked objects' .eh_frame
+  // separately from the archive members', so archive FDEs land outside the
+  // markers and unwinding finds almost nothing. But .eh_frame is one contiguous
+  // PE section, so recover its true length from the PE section table (the marker
+  // still gives the correct start). The PE header is little-endian while the CPU
+  // is big-endian, so every multi-byte field is assembled from bytes by hand.
+  {
+    const unsigned char *pe = 0;
+    for (uintptr_t a = info.dwarf_section & ~(uintptr_t)0xFFF;
+         a >= 0x82000000; a -= 0x1000) {
+      const unsigned char *p = (const unsigned char *)a;
+      if (p[0] == 'M' && p[1] == 'Z') {
+        uint32_t peoff = (uint32_t)p[0x3C] | ((uint32_t)p[0x3D] << 8) |
+                         ((uint32_t)p[0x3E] << 16) | ((uint32_t)p[0x3F] << 24);
+        if (peoff < 0x10000 && p[peoff] == 'P' && p[peoff + 1] == 'E' &&
+            p[peoff + 2] == 0 && p[peoff + 3] == 0) {
+          pe = p;
+          break;
+        }
+      }
+    }
+    if (pe) {
+      uint32_t peoff = (uint32_t)pe[0x3C] | ((uint32_t)pe[0x3D] << 8) |
+                       ((uint32_t)pe[0x3E] << 16) | ((uint32_t)pe[0x3F] << 24);
+      const unsigned char *coff = pe + peoff + 4; // skip "PE\0\0"
+      uint16_t nsec = (uint16_t)(coff[2] | (coff[3] << 8));
+      uint16_t optsz = (uint16_t)(coff[16] | (coff[17] << 8));
+      const unsigned char *sec = coff + 20 + optsz;
+      uintptr_t ehRva = info.dwarf_section - (uintptr_t)pe;
+      for (uint16_t i = 0; i < nsec; ++i) {
+        const unsigned char *s = sec + (uintptr_t)i * 40;
+        uint32_t vsize = (uint32_t)s[8] | ((uint32_t)s[9] << 8) |
+                         ((uint32_t)s[10] << 16) | ((uint32_t)s[11] << 24);
+        uint32_t vaddr = (uint32_t)s[12] | ((uint32_t)s[13] << 8) |
+                         ((uint32_t)s[14] << 16) | ((uint32_t)s[15] << 24);
+        if (ehRva >= vaddr && ehRva < (uintptr_t)vaddr + vsize) {
+          info.dwarf_section_length = (size_t)(vaddr + vsize - ehRva);
+          break;
+        }
+      }
+    }
+  }
   _LIBUNWIND_TRACE_UNWINDING("findUnwindSections: section %p length %p",
                              (void *)info.dwarf_section, (void *)info.dwarf_section_length);
 #if defined(_LIBUNWIND_SUPPORT_DWARF_INDEX)
