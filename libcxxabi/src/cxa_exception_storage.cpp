@@ -24,7 +24,7 @@ extern "C" {
 } // extern "C"
 } // namespace __cxxabiv1
 
-#elif __has_feature(cxx_thread_local)
+#elif __has_feature(cxx_thread_local) && !defined(_LIBCXXABI_XBOX360_TLS_KEY)
 
 namespace __cxxabiv1 {
 namespace {

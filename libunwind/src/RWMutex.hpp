@@ -24,7 +24,30 @@
 
 namespace libunwind {
 
-#if defined(_LIBUNWIND_HAS_NO_THREADS)
+#if defined(_LIBUNWIND_XBOX360)
+
+extern "C" {
+void RtlInitializeCriticalSection(void *);
+void RtlEnterCriticalSection(void *);
+void RtlLeaveCriticalSection(void *);
+}
+
+// Xbox 360: a recursive kernel critical section. Coarse (shared == exclusive)
+// but correct -- it only guards libunwind's global DwarfFDECache so concurrent
+// unwinds on different threads do not race its ring buffer. Constructed at
+// static-init time (pre-main, single-threaded), before any worker spawns.
+class _LIBUNWIND_HIDDEN RWMutex {
+public:
+  RWMutex() { RtlInitializeCriticalSection(&_cs[0]); }
+  bool lock_shared() { RtlEnterCriticalSection(&_cs[0]); return true; }
+  bool unlock_shared() { RtlLeaveCriticalSection(&_cs[0]); return true; }
+  bool lock() { RtlEnterCriticalSection(&_cs[0]); return true; }
+  bool unlock() { RtlLeaveCriticalSection(&_cs[0]); return true; }
+private:
+  unsigned _cs[8];  // >= sizeof(RTL_CRITICAL_SECTION) (28)
+};
+
+#elif defined(_LIBUNWIND_HAS_NO_THREADS)
 
 class _LIBUNWIND_HIDDEN RWMutex {
 public:
