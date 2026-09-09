@@ -2190,6 +2190,16 @@ void PPCFrameLowering::processFunctionBeforeFrameFinalized(MachineFunction &MF,
     LowerBound = TCSPDelta;
   }
 
+  // The Xbox 360 ABI saves the return address at CallerSP-8 -- inside the
+  // negative callee-saved region, where SVR4 instead puts LR at a positive
+  // offset in the caller's frame. getReturnSaveOffset() stores LR there
+  // directly, but the callee-saved GPR/FPR areas below are packed from
+  // CallerSP downward starting at the second GPR slot (-8), so without
+  // reserving the LR doubleword a saved register (e.g. r30) lands on top of the
+  // return address and corrupts it. Reserve that slot for Xbox 360.
+  if (Subtarget.isXbox360ABI())
+    LowerBound -= 8;
+
   // The Floating-point register save area is right below the back chain word
   // of the previous stack frame.
   if (HasFPSaveArea) {
