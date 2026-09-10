@@ -1,0 +1,164 @@
+// -*- C++ -*-
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// <generator> (C++23, [coro.generator], P2502).
+//
+// Not yet implemented in upstream libc++; provided by the RXDK-360 llvm fork.
+// std::generator<Ref, Val> -- a synchronous coroutine range that yields values.
+// This implements single-value co_yield (the common case) fully; nested
+// generators via ranges::elements_of and custom allocators are a later refinement.
+//
+//===----------------------------------------------------------------------===//
+#ifndef _LIBCPP_GENERATOR
+#define _LIBCPP_GENERATOR
+
+#include <__config>
+#include <__utility/move.h>
+#include <coroutine>
+#include <cstddef>
+#include <exception>
+#include <__concepts/constructible.h>
+#include <__memory/addressof.h>
+#include <__ranges/view_interface.h>
+#include <__utility/exchange.h>
+#include <iterator>
+#include <new>
+#include <type_traits>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#  pragma GCC system_header
+#endif
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+#if _LIBCPP_STD_VER >= 23
+
+template <class _Ref, class _Val = void, class _Allocator = void>
+class generator;
+
+template <class _Ref, class _Val, class _Allocator>
+class generator : public ranges::view_interface<generator<_Ref, _Val, _Allocator>> {
+  using _Value _LIBCPP_NODEBUG = conditional_t<is_void_v<_Val>, remove_cvref_t<_Ref>, _Val>;
+  static_assert(!is_void_v<_Value>, "generator value type must not be void");
+
+public:
+  using value      = _Value;
+  using reference  = conditional_t<is_void_v<_Val>, _Ref&&, _Ref>;
+  using __yielded  = conditional_t<is_reference_v<reference>, reference, const reference&>;
+
+  class promise_type;
+  using __handle = coroutine_handle<promise_type>;
+
+  class promise_type {
+  public:
+    add_pointer_t<__yielded> __value_ = nullptr;
+    exception_ptr __except_;
+
+    generator get_return_object() noexcept { return generator(__handle::from_promise(*this)); }
+
+    suspend_always initial_suspend() const noexcept { return {}; }
+    suspend_always final_suspend() noexcept { return {}; }
+
+    suspend_always yield_value(__yielded __val) noexcept {
+      __value_ = std::addressof(__val);
+      return {};
+    }
+
+    // Yielding an lvalue into a by-value generator: hold a copy alive across the
+    // suspension so operator* has something to reference.
+    struct __copy_awaiter {
+      remove_cvref_t<__yielded> __copy_;
+      add_pointer_t<__yielded>* __slot_;
+      bool await_ready() const noexcept { return false; }
+      void await_suspend(__handle) noexcept { *__slot_ = std::addressof(__copy_); }
+      void await_resume() const noexcept {}
+    };
+    template <class _Up = remove_reference_t<__yielded>,
+              __enable_if_t<is_rvalue_reference_v<__yielded> && constructible_from<remove_cvref_t<__yielded>, const _Up&>,
+                            int> = 0>
+    __copy_awaiter yield_value(const _Up& __lval) noexcept(is_nothrow_constructible_v<remove_cvref_t<__yielded>, const _Up&>) {
+      return __copy_awaiter{__lval, std::addressof(__value_)};
+    }
+
+    void await_transform() = delete;
+    void return_void() const noexcept {}
+    void unhandled_exception() { __except_ = current_exception(); }
+
+    void* operator new(size_t __size) { return ::operator new(__size); }
+    void operator delete(void* __ptr, size_t __size) noexcept { ::operator delete(__ptr, __size); }
+  };
+
+  class __iterator {
+  public:
+    using value_type      = _Value;
+    using difference_type = ptrdiff_t;
+
+    __iterator(__iterator&& __other) noexcept : __coro_(std::exchange(__other.__coro_, {})) {}
+    __iterator& operator=(__iterator&& __other) noexcept {
+      __coro_ = std::exchange(__other.__coro_, {});
+      return *this;
+    }
+
+    reference operator*() const noexcept(is_nothrow_copy_constructible_v<reference>) {
+      return static_cast<reference>(*__coro_.promise().__value_);
+    }
+
+    __iterator& operator++() {
+      __coro_.resume();
+      if (__coro_.done()) {
+        auto& __p = __coro_.promise();
+        if (__p.__except_)
+          rethrow_exception(__p.__except_);
+      }
+      return *this;
+    }
+    void operator++(int) { ++*this; }
+
+    friend bool operator==(const __iterator& __it, default_sentinel_t) noexcept { return __it.__coro_.done(); }
+
+  private:
+    friend generator;
+    explicit __iterator(__handle __c) noexcept : __coro_(__c) {}
+    __handle __coro_;
+  };
+
+  generator(const generator&) = delete;
+  generator(generator&& __other) noexcept : __coro_(std::exchange(__other.__coro_, {})) {}
+
+  ~generator() {
+    if (__coro_)
+      __coro_.destroy();
+  }
+
+  generator& operator=(generator __other) noexcept {
+    std::swap(__coro_, __other.__coro_);
+    return *this;
+  }
+
+  __iterator begin() {
+    __coro_.resume();
+    if (__coro_.done()) {
+      auto& __p = __coro_.promise();
+      if (__p.__except_)
+        rethrow_exception(__p.__except_);
+    }
+    return __iterator{__coro_};
+  }
+  default_sentinel_t end() const noexcept { return default_sentinel; }
+
+private:
+  explicit generator(__handle __c) noexcept : __coro_(__c) {}
+  __handle __coro_;
+};
+
+#endif // _LIBCPP_STD_VER >= 23
+
+_LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_GENERATOR
