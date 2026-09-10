@@ -1,0 +1,256 @@
+// -*- C++ -*-
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// <spanstream> (C++23, [span.streams], P0448).
+//
+// Not yet implemented in upstream libc++; provided by the RXDK-360 llvm fork.
+// Fixed-buffer streams over a std::span -- like <sstream> but with no dynamic
+// allocation and no ownership of the storage.
+//
+//===----------------------------------------------------------------------===//
+#ifndef _LIBCPP_SPANSTREAM
+#define _LIBCPP_SPANSTREAM
+
+#include <__config>
+#include <__utility/move.h>
+#include <cstddef>
+#include <istream>
+#include <ostream>
+#include <span>
+#include <streambuf>
+#include <string_view>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#  pragma GCC system_header
+#endif
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+#if _LIBCPP_STD_VER >= 23
+
+template <class _CharT, class _Traits = char_traits<_CharT>>
+class basic_spanbuf : public basic_streambuf<_CharT, _Traits> {
+  using __base _LIBCPP_NODEBUG = basic_streambuf<_CharT, _Traits>;
+
+public:
+  using char_type   = _CharT;
+  using int_type    = typename _Traits::int_type;
+  using pos_type    = typename _Traits::pos_type;
+  using off_type    = typename _Traits::off_type;
+  using traits_type = _Traits;
+
+  basic_spanbuf() : basic_spanbuf(std::span<_CharT>()) {}
+  explicit basic_spanbuf(ios_base::openmode __which) : basic_spanbuf(std::span<_CharT>(), __which) {}
+  explicit basic_spanbuf(std::span<_CharT> __s, ios_base::openmode __which = ios_base::in | ios_base::out)
+      : __base(), __mode_(__which) {
+    this->span(__s);
+  }
+
+  basic_spanbuf(const basic_spanbuf&) = delete;
+  basic_spanbuf(basic_spanbuf&& __rhs) : __base(std::move(__rhs)), __mode_(__rhs.__mode_), __buf_(__rhs.__buf_) {}
+
+  basic_spanbuf& operator=(const basic_spanbuf&) = delete;
+  basic_spanbuf& operator=(basic_spanbuf&& __rhs) {
+    __base::operator=(std::move(__rhs));
+    __mode_ = __rhs.__mode_;
+    __buf_  = __rhs.__buf_;
+    return *this;
+  }
+
+  void swap(basic_spanbuf& __rhs) {
+    __base::swap(__rhs);
+    std::swap(__mode_, __rhs.__mode_);
+    std::swap(__buf_, __rhs.__buf_);
+  }
+
+  std::span<_CharT> span() const noexcept {
+    if (__mode_ & ios_base::out)
+      return std::span<_CharT>(this->pbase(), this->pptr());
+    return __buf_;
+  }
+
+  void span(std::span<_CharT> __s) noexcept {
+    __buf_ = __s;
+    if (__mode_ & ios_base::out) {
+      this->setp(__s.data(), __s.data() + __s.size());
+      if (__mode_ & ios_base::ate)
+        this->pbump(static_cast<int>(__s.size()));
+    }
+    if (__mode_ & ios_base::in)
+      this->setg(__s.data(), __s.data(), __s.data() + __s.size());
+  }
+
+protected:
+  int_type underflow() override {
+    if (this->gptr() != this->egptr())
+      return _Traits::to_int_type(*this->gptr());
+    return _Traits::eof();
+  }
+
+  int_type overflow(int_type __c = _Traits::eof()) override {
+    if (!(__mode_ & ios_base::out))
+      return _Traits::eof();
+    if (_Traits::eq_int_type(__c, _Traits::eof()))
+      return _Traits::not_eof(__c);
+    if (this->pptr() == this->epptr())
+      return _Traits::eof(); // fixed buffer: cannot grow
+    *this->pptr() = _Traits::to_char_type(__c);
+    this->pbump(1);
+    return __c;
+  }
+
+  int_type pbackfail(int_type __c = _Traits::eof()) override {
+    if (this->eback() == this->gptr())
+      return _Traits::eof();
+    if (!_Traits::eq_int_type(__c, _Traits::eof()) &&
+        !_Traits::eq_int_type(__c, _Traits::to_int_type(this->gptr()[-1])) && !(__mode_ & ios_base::out))
+      return _Traits::eof();
+    this->gbump(-1);
+    if (!_Traits::eq_int_type(__c, _Traits::eof()))
+      *this->gptr() = _Traits::to_char_type(__c);
+    return _Traits::not_eof(__c);
+  }
+
+  basic_streambuf<_CharT, _Traits>* setbuf(_CharT* __s, streamsize __n) override {
+    this->span(std::span<_CharT>(__s, static_cast<size_t>(__n)));
+    return this;
+  }
+
+  pos_type seekoff(off_type __off, ios_base::seekdir __way, ios_base::openmode __which = ios_base::in | ios_base::out)
+      override {
+    const bool __in  = (__which & ios_base::in) != 0;
+    const bool __out = (__which & ios_base::out) != 0;
+    if (__in && __out && __way == ios_base::cur)
+      return pos_type(off_type(-1));
+    if (!__in && !__out)
+      return pos_type(off_type(-1));
+
+    off_type __base_off = 0;
+    if (__way == ios_base::beg)
+      __base_off = 0;
+    else if (__way == ios_base::end)
+      __base_off = (__mode_ & ios_base::out) ? off_type(this->pptr() - this->pbase())
+                                             : off_type(static_cast<off_type>(__buf_.size()));
+    else { // cur
+      if (__in)
+        __base_off = off_type(this->gptr() - this->eback());
+      else
+        __base_off = off_type(this->pptr() - this->pbase());
+    }
+
+    const off_type __newoff = __base_off + __off;
+    if (__newoff < 0 || __newoff > static_cast<off_type>(__buf_.size()))
+      return pos_type(off_type(-1));
+    if (__in)
+      this->setg(this->eback(), this->eback() + __newoff, this->egptr());
+    if (__out) {
+      this->setp(this->pbase(), this->epptr());
+      this->pbump(static_cast<int>(__newoff));
+    }
+    return pos_type(__newoff);
+  }
+
+  pos_type seekpos(pos_type __sp, ios_base::openmode __which = ios_base::in | ios_base::out) override {
+    return seekoff(off_type(__sp), ios_base::beg, __which);
+  }
+
+private:
+  ios_base::openmode __mode_;
+  std::span<_CharT> __buf_;
+};
+
+template <class _CharT, class _Traits>
+void swap(basic_spanbuf<_CharT, _Traits>& __x, basic_spanbuf<_CharT, _Traits>& __y) {
+  __x.swap(__y);
+}
+
+template <class _CharT, class _Traits = char_traits<_CharT>>
+class basic_ispanstream : public basic_istream<_CharT, _Traits> {
+  basic_spanbuf<_CharT, _Traits> __sb_;
+
+public:
+  explicit basic_ispanstream(std::span<_CharT> __s, ios_base::openmode __which = ios_base::in)
+      : basic_istream<_CharT, _Traits>(&__sb_), __sb_(__s, __which | ios_base::in) {}
+
+  template <class _ROElem, __enable_if_t<is_convertible_v<std::span<_ROElem>, std::span<_CharT>>, int> = 0>
+  explicit basic_ispanstream(std::span<_ROElem> __s)
+      : basic_ispanstream(std::span<_CharT>(const_cast<_CharT*>(__s.data()), __s.size())) {}
+
+  basic_ispanstream(const basic_ispanstream&) = delete;
+  basic_ispanstream(basic_ispanstream&& __rhs)
+      : basic_istream<_CharT, _Traits>(std::move(__rhs)), __sb_(std::move(__rhs.__sb_)) {
+    this->set_rdbuf(&__sb_);
+  }
+  basic_ispanstream& operator=(const basic_ispanstream&) = delete;
+
+  basic_spanbuf<_CharT, _Traits>* rdbuf() const noexcept {
+    return const_cast<basic_spanbuf<_CharT, _Traits>*>(&__sb_);
+  }
+  std::span<const _CharT> span() const noexcept { return __sb_.span(); }
+  void span(std::span<_CharT> __s) noexcept { __sb_.span(__s); }
+};
+
+template <class _CharT, class _Traits = char_traits<_CharT>>
+class basic_ospanstream : public basic_ostream<_CharT, _Traits> {
+  basic_spanbuf<_CharT, _Traits> __sb_;
+
+public:
+  explicit basic_ospanstream(std::span<_CharT> __s, ios_base::openmode __which = ios_base::out)
+      : basic_ostream<_CharT, _Traits>(&__sb_), __sb_(__s, __which | ios_base::out) {}
+
+  basic_ospanstream(const basic_ospanstream&) = delete;
+  basic_ospanstream(basic_ospanstream&& __rhs)
+      : basic_ostream<_CharT, _Traits>(std::move(__rhs)), __sb_(std::move(__rhs.__sb_)) {
+    this->set_rdbuf(&__sb_);
+  }
+  basic_ospanstream& operator=(const basic_ospanstream&) = delete;
+
+  basic_spanbuf<_CharT, _Traits>* rdbuf() const noexcept {
+    return const_cast<basic_spanbuf<_CharT, _Traits>*>(&__sb_);
+  }
+  std::span<_CharT> span() const noexcept { return __sb_.span(); }
+  void span(std::span<_CharT> __s) noexcept { __sb_.span(__s); }
+};
+
+template <class _CharT, class _Traits = char_traits<_CharT>>
+class basic_spanstream : public basic_iostream<_CharT, _Traits> {
+  basic_spanbuf<_CharT, _Traits> __sb_;
+
+public:
+  explicit basic_spanstream(std::span<_CharT> __s, ios_base::openmode __which = ios_base::out | ios_base::in)
+      : basic_iostream<_CharT, _Traits>(&__sb_), __sb_(__s, __which) {}
+
+  basic_spanstream(const basic_spanstream&) = delete;
+  basic_spanstream(basic_spanstream&& __rhs)
+      : basic_iostream<_CharT, _Traits>(std::move(__rhs)), __sb_(std::move(__rhs.__sb_)) {
+    this->set_rdbuf(&__sb_);
+  }
+  basic_spanstream& operator=(const basic_spanstream&) = delete;
+
+  basic_spanbuf<_CharT, _Traits>* rdbuf() const noexcept {
+    return const_cast<basic_spanbuf<_CharT, _Traits>*>(&__sb_);
+  }
+  std::span<_CharT> span() const noexcept { return __sb_.span(); }
+  void span(std::span<_CharT> __s) noexcept { __sb_.span(__s); }
+};
+
+using spanbuf      = basic_spanbuf<char>;
+using ispanstream  = basic_ispanstream<char>;
+using ospanstream  = basic_ospanstream<char>;
+using spanstream   = basic_spanstream<char>;
+using wspanbuf     = basic_spanbuf<wchar_t>;
+using wispanstream = basic_ispanstream<wchar_t>;
+using wospanstream = basic_ospanstream<wchar_t>;
+using wspanstream  = basic_spanstream<wchar_t>;
+
+#endif // _LIBCPP_STD_VER >= 23
+
+_LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_SPANSTREAM
