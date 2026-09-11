@@ -67,8 +67,16 @@ Symbol *SymbolTable::insert(StringRef name) {
   // Since this is a hot path, the following string search code is
   // optimized for speed. StringRef::find(char) is much faster than
   // StringRef::find(StringRef).
+  //
+  // Xbox 360 (RXDK) note: MSVC name mangling ALSO uses "@@" -- e.g. the global
+  // function `?f@@H` or `?LockedCmpXchg@@YAHPCHHH@Z` -- with the first '@'
+  // immediately followed by '@'. Treating that as an ELF version separator
+  // truncates every mangled global symbol to its name part ("?LockedCmpXchg"),
+  // so distinct overloads collide (spurious duplicate-symbol errors, and worse,
+  // silent mis-resolution). This target reuses MSVC-mangled COFF libraries as
+  // ELF and never uses ELF symbol versioning, so disable the @@ split.
   StringRef stem = name;
-  size_t pos = name.find('@');
+  size_t pos = ctx.arg.emachine == EM_PPC ? StringRef::npos : name.find('@');
   if (pos != StringRef::npos && pos + 1 < name.size() && name[pos + 1] == '@')
     stem = name.take_front(pos);
 
