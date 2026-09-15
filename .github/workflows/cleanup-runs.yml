@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# Delete Actions runs and artifacts older than one day so the fork's
+# Actions tab stays usable.
+
+name: Cleanup old Actions
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup-old-actions
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    name: delete > 1 day
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old workflow runs and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import subprocess
+          import sys
+          import urllib.parse
+
+          repo = os.environ["GH_REPO"]
+          this_run = int(os.environ["GITHUB_RUN_ID"])
+          cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+
+          def gh_api(method, path, *args):
+              cmd = ["gh", "api", "-X", method, f"/repos/{repo}{path}", *args]
+              return subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+          def paginate(path):
+              cmd = ["gh", "api", "--paginate", f"/repos/{repo}{path}"]
+              out = subprocess.check_output(cmd, text=True)
+              # --paginate concatenates JSON arrays/objects; split by joining arrays.
+              chunks = []
+              decoder = json.JSONDecoder()
+              s = out.strip()
+              idx = 0
+              while idx < len(s):
+                  while idx < len(s) and s[idx].isspace():
+                      idx += 1
+                  if idx >= len(s):
+                      break
+                  obj, end = decoder.raw_decode(s, idx)
+                  chunks.append(obj)
+                  idx = end
+              return chunks
+
+          deleted_runs = 0
+          for page in paginate("/actions/runs?per_page=100"):
+              for run in page.get("workflow_runs", []):
+                  created = dt.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+                  if run["id"] == this_run or created >= cutoff:
+                      continue
+                  r = gh_api("DELETE", f"/actions/runs/{run['id']}")
+                  if r.returncode == 0:
+                      deleted_runs += 1
+                      print(f"deleted run {run['id']} {run.get('name')} {run['created_at']}")
+                  else:
+                      print(f"skip run {run['id']}: {r.stderr.strip() or r.stdout.strip()}", file=sys.stderr)
+
+          deleted_arts = 0
+          for page in paginate("/actions/artifacts?per_page=100"):
+              for art in page.get("artifacts", []):
+                  created = dt.datetime.fromisoformat(art["created_at"].replace("Z", "+00:00"))
+                  if created >= cutoff:
+                      continue
+                  r = gh_api("DELETE", f"/actions/artifacts/{art['id']}")
+                  if r.returncode == 0:
+                      deleted_arts += 1
+                      print(f"deleted artifact {art['id']} {art.get('name')} {art['created_at']}")
+                  else:
+                      print(f"skip artifact {art['id']}: {r.stderr.strip() or r.stdout.strip()}", file=sys.stderr)
+
+          print(f"done: deleted {deleted_runs} runs, {deleted_arts} artifacts older than {cutoff.isoformat()}")
+          PY
