@@ -139,13 +139,13 @@ jobs:
         shell: cmd
         run: |
           call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
-          cmake --build build --target clang lld llc
+          cmake --build build --target clang lld llc llvm-ar
           if errorlevel 1 exit /b 1
 
       - name: Build clang + lld (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: cmake --build build --target clang lld llc
+        run: cmake --build build --target clang lld llc llvm-ar
 
       - name: Package
         shell: pwsh
@@ -159,6 +159,7 @@ jobs:
           }
           if (-not (Test-Path "$root/bin/clang$exe")) { throw "clang$exe missing" }
           if (-not (Test-Path "$root/bin/ld.lld$exe")) { throw "ld.lld$exe missing" }
+          if (-not (Test-Path "$root/bin/llvm-ar$exe")) { throw "llvm-ar$exe missing" }
           if (-not (Test-Path "$root/bin/clang++$exe") -and (Test-Path "$root/bin/clang$exe")) {
             Copy-Item "$root/bin/clang$exe" "$root/bin/clang++$exe"
           }
