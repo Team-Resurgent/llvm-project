@@ -184,6 +184,7 @@ jobs:
           if (Test-Path "libc/include") { Copy-Needed "libc/include" "$root/libc/include" }
           if (Test-Path "libc/shared") { Copy-Needed "libc/shared" "$root/libc/shared" }
           if (Test-Path "libc/src/__support") { Copy-Needed "libc/src/__support" "$root/libc/src/__support" }
+          Copy-Needed "libc/hdr" "$root/libc/hdr"
 
           foreach ($p in @(
             "$root/lib/clang",
@@ -192,7 +193,8 @@ jobs:
             "$root/libcxxabi/include",
             "$root/libcxxabi/src",
             "$root/libunwind/include",
-            "$root/libunwind/src"
+            "$root/libunwind/src",
+            "$root/libc/hdr"
           )) {
             if (-not (Test-Path $p)) { throw "package missing $p" }
           }
