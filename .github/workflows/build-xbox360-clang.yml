@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   build:
-    name: windows-x64
+    name: xbox360-windows-x64
     runs-on: windows-2022
     timeout-minutes: 240
     steps:
@@ -41,6 +41,8 @@ jobs:
             third-party
             libc
             libunwind
+            libcxx
+            libcxxabi
 
       - name: Locate VS + Ninja
         id: vs
@@ -87,7 +89,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $root = "clang-xbox360-windows-x64"
+          $root = "xbox360-windows-x64"
           New-Item -ItemType Directory -Force -Path "$root/bin","$root/lib" | Out-Null
           foreach ($n in @("clang.exe","clang++.exe","ld.lld.exe","lld.exe","llvm-ar.exe","llc.exe")) {
             $src = "build/bin/$n"
@@ -101,6 +103,35 @@ jobs:
           if (Test-Path "build/lib/clang") {
             Copy-Item "build/lib/clang" "$root/lib/clang" -Recurse
           }
+
+          function Copy-Needed([string]$src, [string]$dst) {
+            if (-not (Test-Path $src)) { throw "missing $src" }
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            & robocopy $src $dst /E /XD test tests docs examples benchmarks utils cmake Documentation /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "robocopy $src failed ($LASTEXITCODE)" }
+          }
+          Copy-Needed "libcxx/include" "$root/libcxx/include"
+          Copy-Needed "libcxx/src" "$root/libcxx/src"
+          Copy-Needed "libcxxabi/include" "$root/libcxxabi/include"
+          Copy-Needed "libcxxabi/src" "$root/libcxxabi/src"
+          Copy-Needed "libunwind/include" "$root/libunwind/include"
+          Copy-Needed "libunwind/src" "$root/libunwind/src"
+          if (Test-Path "libc/include") { Copy-Needed "libc/include" "$root/libc/include" }
+          if (Test-Path "libc/shared") { Copy-Needed "libc/shared" "$root/libc/shared" }
+          if (Test-Path "libc/src/__support") { Copy-Needed "libc/src/__support" "$root/libc/src/__support" }
+
+          foreach ($p in @(
+            "$root/lib/clang",
+            "$root/libcxx/include",
+            "$root/libcxx/src",
+            "$root/libcxxabi/include",
+            "$root/libcxxabi/src",
+            "$root/libunwind/include",
+            "$root/libunwind/src"
+          )) {
+            if (-not (Test-Path $p)) { throw "package missing $p" }
+          }
+
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path $root -DestinationPath "dist/$root.zip" -Force
           Get-Item "dist/$root.zip" | Format-List Name, Length
@@ -108,15 +139,15 @@ jobs:
       - name: Smoke-test clang
         shell: pwsh
         run: |
-          $out = & "clang-xbox360-windows-x64/bin/clang.exe" --version 2>&1 | Out-String
+          $out = & "xbox360-windows-x64/bin/clang.exe" --version 2>&1 | Out-String
           Write-Host $out
           if ($out -notmatch "clang") { throw "unexpected clang --version" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clang-xbox360-windows-x64
-          path: dist/clang-xbox360-windows-x64.zip
+          name: xbox360-windows-x64
+          path: dist/xbox360-windows-x64.zip
           if-no-files-found: error
 
   release:
@@ -130,7 +161,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: clang-xbox360-windows-x64
+          name: xbox360-windows-x64
           path: dist
 
       - name: Determine release tag
@@ -161,4 +192,4 @@ jobs:
           name: Xbox 360 clang ${{ steps.meta.outputs.tag }}
           make_latest: true
           generate_release_notes: true
-          files: dist/clang-xbox360-windows-x64.zip
+          files: dist/xbox360-windows-x64.zip
