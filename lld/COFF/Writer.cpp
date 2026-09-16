@@ -2645,12 +2645,10 @@ void Writer::writeSections() {
         // rawSize; stop filling when we reach the end of raw data.
         if (off >= rawSize)
           break;
-        if (off > prevEnd)
-          memset(secBuf + prevEnd, 0xCC, off - prevEnd);
+        memset(secBuf + prevEnd, 0xCC, off - prevEnd);
         prevEnd = std::min(off + static_cast<uint32_t>(c->getSize()), rawSize);
       }
-      if (rawSize > prevEnd)
-        memset(secBuf + prevEnd, 0xCC, rawSize - prevEnd);
+      memset(secBuf + prevEnd, 0xCC, rawSize - prevEnd);
     }
 
     parallelForEach(sec->chunks, [&](Chunk *c) {
@@ -2787,23 +2785,17 @@ void Writer::sortExceptionTables() {
 // bottom), otherwise global objects might not be initialized in the
 // correct order.
 void Writer::sortCRTSectionChunks(std::vector<Chunk *> &chunks) {
-  // CRT initializer lists must only contain section chunks. MSVC import/thunk
-  // objects can contribute non-section chunks to .CRT$* partial sections; in
-  // release builds a missing assert in the comparator below became a crash.
-  auto nonSection = llvm::partition(
-      chunks, [](Chunk *c) { return isa<SectionChunk>(c); });
-  for (Chunk *c : make_range(nonSection, chunks.end()))
-    Warn(ctx) << "ignoring non-section chunk in CRT section: " << c->getDebugName();
-
   auto sectionChunkOrder = [](const Chunk *a, const Chunk *b) {
-    auto *sa = cast<SectionChunk>(a);
-    auto *sb = cast<SectionChunk>(b);
+    auto sa = dyn_cast<SectionChunk>(a);
+    auto sb = dyn_cast<SectionChunk>(b);
+    assert(sa && sb && "Non-section chunks in CRT section!");
+
     StringRef sAObj = sa->file->mb.getBufferIdentifier();
     StringRef sBObj = sb->file->mb.getBufferIdentifier();
 
     return sAObj == sBObj && sa->getSectionNumber() < sb->getSectionNumber();
   };
-  std::stable_sort(chunks.begin(), nonSection, sectionChunkOrder);
+  llvm::stable_sort(chunks, sectionChunkOrder);
 
   if (ctx.config.verbose) {
     for (auto &c : chunks) {
