@@ -8,7 +8,7 @@ name: Xbox 360 clang
 
 on:
   push:
-    branches: [teamresurgent]
+    branches: [xbox360]
   workflow_dispatch:
     inputs:
       release_tag:
