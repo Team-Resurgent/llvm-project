@@ -43,7 +43,12 @@ struct __cxa_exception;
 _LIBCPP_OVERRIDABLE_FUNC_VIS __cxa_exception* __cxa_init_primary_exception(
     void*,
     std::type_info*,
-#    if defined(_WIN32)
+// RXDK-Libs builds with -U_WIN32 (Itanium/POSIX paths) but clang still emits
+// member-function destructors as __thiscall on i386. Keep this declaration's
+// convention in sync with libcxxabi's _LIBCXXABI_DTOR_FUNC (see __cxxabi_config.h)
+// via _LIBCXXABI_FORCE_THISCALL_DTOR, else the two __cxa_init_primary_exception
+// declarations conflict and ~T() is called with the wrong convention.
+#    if defined(_WIN32) || defined(_LIBCXXABI_FORCE_THISCALL_DTOR)
     void(__thiscall*)(void*)) throw();
 #    elif defined(__wasm__)
     // In Wasm, a destructor returns its argument

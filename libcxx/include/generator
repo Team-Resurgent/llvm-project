@@ -1,0 +1,288 @@
+// -*- C++ -*-
+//===----------------------------------------------------------------------===//
+//
+// std::generator (C++23, P2502R2) -- first-party implementation for the Xbox
+// port. libc++ at the vendored snapshot does not ship <generator> yet (no header,
+// no __cpp_lib_generator feature macro), so this provides std::generator and
+// std::ranges::elements_of. It depends only on facilities already present here
+// (<coroutine>, <ranges>, <exception>, type traits, allocators).
+//
+// Design: each promise shares the root's value slot (add_pointer_t<yielded>*) and
+// the root's "active leaf" handle (type-erased coroutine_handle<>); nesting via
+// elements_of pushes a child onto that chain with symmetric transfer, and pops
+// back to the parent at the child's final suspend. Exceptions from a child are
+// rethrown in the parent's frame (so an intervening try/catch around co_yield
+// elements_of works); a root exception surfaces from the iterator's resume.
+//
+//===----------------------------------------------------------------------===//
+#ifndef _LIBCPP_GENERATOR
+#define _LIBCPP_GENERATOR
+
+#include <__config>
+#include <__ranges/elements_of.h> // std::ranges::elements_of (already in libc++)
+#include <coroutine>
+#include <cstddef>
+#include <exception>
+#include <new>
+#include <ranges>
+#include <type_traits>
+#include <utility>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#  pragma GCC system_header
+#endif
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+#if _LIBCPP_STD_VER >= 23
+
+template <class _Ref, class _Val = void, class _Allocator = void>
+class generator;
+
+namespace __gen {
+
+// Allocator support for the coroutine frame. For a stateful allocator a copy is
+// stored just past the frame so operator delete can recover it.
+template <class _Allocator>
+class _Promise_alloc {
+  using _ByteAlloc = typename allocator_traits<_Allocator>::template rebind_alloc<byte>;
+
+  static void* __allocate(_ByteAlloc __alloc, size_t __size) {
+    if constexpr (allocator_traits<_ByteAlloc>::is_always_equal::value) {
+      _ByteAlloc __a = __alloc;
+      return allocator_traits<_ByteAlloc>::allocate(__a, __size);
+    } else {
+      static constexpr size_t __align = alignof(_ByteAlloc);
+      size_t __pad   = (__size + __align - 1) & ~(__align - 1);
+      _ByteAlloc __a = __alloc;
+      byte* __p      = allocator_traits<_ByteAlloc>::allocate(__a, __pad + sizeof(_ByteAlloc));
+      ::new (static_cast<void*>(__p + __pad)) _ByteAlloc(__alloc);
+      return __p;
+    }
+  }
+
+public:
+  static void* operator new(size_t __size)
+    requires default_initializable<_ByteAlloc>
+  {
+    return __allocate(_ByteAlloc(), __size);
+  }
+  template <class _A2, class... _Args>
+  static void* operator new(size_t __size, allocator_arg_t, const _A2& __a, const _Args&...) {
+    return __allocate(static_cast<_ByteAlloc>(_Allocator(__a)), __size);
+  }
+  template <class _This, class _A2, class... _Args>
+  static void* operator new(size_t __size, const _This&, allocator_arg_t, const _A2& __a, const _Args&...) {
+    return __allocate(static_cast<_ByteAlloc>(_Allocator(__a)), __size);
+  }
+  static void operator delete(void* __ptr, size_t __size) noexcept {
+    if constexpr (allocator_traits<_ByteAlloc>::is_always_equal::value) {
+      _ByteAlloc __a;
+      allocator_traits<_ByteAlloc>::deallocate(__a, static_cast<byte*>(__ptr), __size);
+    } else {
+      static constexpr size_t __align = alignof(_ByteAlloc);
+      size_t __pad         = (__size + __align - 1) & ~(__align - 1);
+      byte* __p            = static_cast<byte*>(__ptr);
+      _ByteAlloc* __stored = reinterpret_cast<_ByteAlloc*>(__p + __pad);
+      _ByteAlloc __a(*__stored);
+      __stored->~_ByteAlloc();
+      allocator_traits<_ByteAlloc>::deallocate(__a, __p, __pad + sizeof(_ByteAlloc));
+    }
+  }
+};
+
+// Default (void) allocator: plain ::operator new / ::operator delete.
+template <>
+class _Promise_alloc<void> {};
+
+} // namespace __gen
+
+template <class _Ref, class _Val, class _Allocator>
+class generator : public ranges::view_interface<generator<_Ref, _Val, _Allocator>> {
+public:
+  using __value     = conditional_t<is_void_v<_Val>, remove_cvref_t<_Ref>, _Val>;
+  using __reference = conditional_t<is_void_v<_Val>, _Ref&&, _Ref>;
+  using __yielded   = conditional_t<is_reference_v<__reference>, __reference, const __reference&>;
+
+  static_assert(is_object_v<__value> && same_as<__value, remove_cvref_t<__value>>,
+                "generator's value type must be a cv-unqualified object type");
+
+  class promise_type;
+
+private:
+  using __handle = coroutine_handle<promise_type>;
+
+public:
+  class iterator;
+
+  generator(const generator&)            = delete;
+  generator& operator=(const generator&) = delete;
+
+  generator(generator&& __o) noexcept : __coro_(std::exchange(__o.__coro_, {})) {}
+  generator& operator=(generator __o) noexcept {
+    std::swap(__coro_, __o.__coro_);
+    return *this;
+  }
+  ~generator() {
+    if (__coro_)
+      __coro_.destroy();
+  }
+
+  iterator begin() {
+    promise_type& __p = __coro_.promise();
+    __p.__value_ptr_  = &__p.__value_;
+    __p.__active_     = __coro_;
+    __p.__active_.resume();
+    __p.__check();
+    return iterator{__coro_};
+  }
+  default_sentinel_t end() const noexcept { return default_sentinel; }
+
+private:
+  template <class, class, class>
+  friend class generator;
+
+  __handle __coro_{};
+  explicit generator(__handle __c) noexcept : __coro_(__c) {}
+
+public:
+  class promise_type : public __gen::_Promise_alloc<_Allocator> {
+  public:
+    add_pointer_t<__yielded> __value_      = nullptr; // root: current value
+    add_pointer_t<__yielded>* __value_ptr_ = &__value_;
+    coroutine_handle<> __active_{}; // root: deepest running leaf
+    coroutine_handle<> __parent_{}; // this frame's parent (empty at root)
+    coroutine_handle<>* __active_root_ = &__active_; // -> root's __active_
+    exception_ptr __except_;
+
+    void __check() {
+      if (__except_)
+        std::rethrow_exception(std::exchange(__except_, nullptr));
+    }
+
+    generator get_return_object() noexcept { return generator{__handle::from_promise(*this)}; }
+    suspend_always initial_suspend() const noexcept { return {}; }
+
+    // Awaiter that drives a nested (child) generator: symmetric-transfer into the
+    // child, wiring its value slot / active-root / parent to this frame's, then
+    // pop back here at the child's final suspend. (Defined before yield_value uses
+    // it -- nested type names need to be declared before use.)
+    template <class _Inner>
+    struct __nest_awaiter {
+      _Inner __gen;
+      bool await_ready() noexcept { return !__gen.__coro_; }
+      coroutine_handle<> await_suspend(__handle __cur) noexcept {
+        promise_type& __pp = __cur.promise();
+        auto __chh         = __gen.__coro_;
+        auto& __cp         = __chh.promise();
+        __cp.__value_ptr_    = __pp.__value_ptr_;
+        __cp.__active_root_  = __pp.__active_root_;
+        __cp.__parent_       = __cur;
+        *__pp.__active_root_ = __chh;
+        return __chh;
+      }
+      void await_resume() {
+        if (__gen.__coro_) {
+          auto& __cp = __gen.__coro_.promise();
+          if (__cp.__except_)
+            std::rethrow_exception(std::exchange(__cp.__except_, nullptr));
+        }
+      }
+    };
+
+    struct __final_awaiter {
+      bool await_ready() noexcept { return false; }
+      coroutine_handle<> await_suspend(__handle __h) noexcept {
+        promise_type& __p = __h.promise();
+        if (__p.__parent_) {
+          *__p.__active_root_ = __p.__parent_;
+          return __p.__parent_;
+        }
+        return noop_coroutine();
+      }
+      void await_resume() noexcept {}
+    };
+
+    suspend_always yield_value(__yielded __v) noexcept {
+      *__value_ptr_ = std::addressof(__v);
+      return {};
+    }
+
+    // co_yield an lvalue when the reference is an rvalue reference: copy into a
+    // temporary held by the awaiter for the duration of the suspension.
+    auto yield_value(const remove_reference_t<__yielded>& __lval) noexcept(
+        is_nothrow_constructible_v<remove_cvref_t<__yielded>, const remove_reference_t<__yielded>&>)
+      requires(is_rvalue_reference_v<__yielded> &&
+               constructible_from<remove_cvref_t<__yielded>, const remove_reference_t<__yielded>&>)
+    {
+      struct __awaiter {
+        remove_cvref_t<__yielded> __val;
+        add_pointer_t<__yielded>* __slot;
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(__handle) noexcept { *__slot = std::addressof(__val); }
+        void await_resume() const noexcept {}
+      };
+      return __awaiter{__lval, __value_ptr_};
+    }
+
+    // co_yield ranges::elements_of(r): r is any input range (including another
+    // generator). Wrap it in an inner generator coroutine and splice its elements,
+    // reusing the nesting chain. Same _Ref/_Val => identical __yielded type.
+    template <ranges::input_range _R2, class _A2>
+    auto yield_value(ranges::elements_of<_R2, _A2> __e) {
+      using _Inner = generator<_Ref, _Val, void>;
+      auto __make  = [](_R2 __r) -> _Inner {
+        for (auto&& __x : __r)
+          co_yield static_cast<__yielded>(std::forward<decltype(__x)>(__x));
+      };
+      return __nest_awaiter<_Inner>{__make(std::forward<_R2>(__e.range))};
+    }
+
+    __final_awaiter final_suspend() noexcept { return {}; }
+
+    void await_transform() = delete;
+    void return_void() noexcept {}
+    void unhandled_exception() { __except_ = std::current_exception(); }
+
+    __reference __get() const noexcept { return static_cast<__reference>(*__value_); }
+  };
+
+  class iterator {
+  public:
+    using value_type      = __value;
+    using difference_type  = ptrdiff_t;
+
+    iterator(iterator&& __o) noexcept : __coro_(std::exchange(__o.__coro_, {})) {}
+    iterator& operator=(iterator&& __o) noexcept {
+      __coro_ = std::exchange(__o.__coro_, {});
+      return *this;
+    }
+
+    __reference operator*() const noexcept(is_nothrow_copy_constructible_v<__reference>) {
+      return __coro_.promise().__get();
+    }
+
+    iterator& operator++() {
+      promise_type& __p = __coro_.promise();
+      __p.__active_.resume();
+      __p.__check();
+      return *this;
+    }
+    void operator++(int) { ++*this; }
+
+    friend bool operator==(const iterator& __it, default_sentinel_t) noexcept {
+      return __it.__coro_.done();
+    }
+
+  private:
+    friend class generator;
+    explicit iterator(__handle __c) noexcept : __coro_(__c) {}
+    __handle __coro_;
+  };
+};
+
+#endif // _LIBCPP_STD_VER >= 23
+
+_LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_GENERATOR
