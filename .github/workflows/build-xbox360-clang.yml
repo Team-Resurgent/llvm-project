@@ -1,0 +1,274 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# Build the Xbox 360 (MS-PPC) clang + lld for each host OS/arch and publish
+# a moving "latest" GitHub Release. The compiler always targets
+# powerpc-unknown-xbox360; host zips are named xbox360-<os>-<arch>.
+
+name: Xbox 360 clang
+
+on:
+  push:
+    branches: [xbox360]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (empty = move the rolling "latest" release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xbox360-clang
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: xbox360-windows-x64
+            os: windows-2022
+            vcvars: vcvars64.bat
+          - name: xbox360-windows-arm64
+            os: windows-11-vs2026-arm
+            vcvars: vcvarsarm64.bat
+          - name: xbox360-linux-x64
+            os: ubuntu-24.04
+          - name: xbox360-linux-arm64
+            os: ubuntu-24.04-arm
+          - name: xbox360-macos-x64
+            os: macos-15-intel
+          - name: xbox360-macos-arm64
+            os: macos-15
+    steps:
+      - name: Checkout (compiler cone)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout-cone-mode: true
+          sparse-checkout: |
+            llvm
+            clang
+            lld
+            cmake
+            third-party
+            libc
+            libunwind
+            libcxx
+            libcxxabi
+
+      - name: Install Ninja (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            brew install ninja
+          fi
+          ninja --version
+
+      - name: Locate VS + Ninja
+        if: runner.os == 'Windows'
+        id: vs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) {
+            $vs = & $vswhere -latest -products * -property installationPath
+          }
+          if (-not $vs) { throw "Visual Studio not found" }
+          $ninja = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+          if (-not (Test-Path $ninja)) { throw "Ninja not found under $vs" }
+          echo "vs=$vs" >> $env:GITHUB_OUTPUT
+          echo "ninja=$ninja" >> $env:GITHUB_OUTPUT
+          echo "VS=$vs"
+          echo "Ninja=$ninja"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
+          cmake -G Ninja -S llvm -B build ^
+            -DCMAKE_MAKE_PROGRAM="${{ steps.vs.outputs.ninja }}" ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DLLVM_ENABLE_PROJECTS="clang;lld" ^
+            -DLLVM_TARGETS_TO_BUILD=PowerPC ^
+            -DLLVM_ENABLE_ASSERTIONS=ON ^
+            -DLLVM_OPTIMIZED_TABLEGEN=ON ^
+            -DLLVM_APPEND_VC_REV=OFF ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DCLANG_INCLUDE_TESTS=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF ^
+            -DLLVM_ENABLE_LIBXML2=OFF
+          if errorlevel 1 exit /b 1
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_TARGETS_TO_BUILD=PowerPC \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_OPTIMIZED_TABLEGEN=ON \
+            -DLLVM_APPEND_VC_REV=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DCLANG_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF
+
+      - name: Build clang + lld (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
+          cmake --build build --target clang lld llc llvm-ar
+          if errorlevel 1 exit /b 1
+
+      - name: Build clang + lld (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cmake --build build --target clang lld llc llvm-ar
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $root = "${{ matrix.name }}"
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          New-Item -ItemType Directory -Force -Path "$root/bin","$root/lib" | Out-Null
+          foreach ($n in @("clang","clang++","ld.lld","lld","llvm-ar","llc")) {
+            $src = "build/bin/$n$exe"
+            if (Test-Path $src) { Copy-Item $src "$root/bin/" }
+          }
+          if (-not (Test-Path "$root/bin/clang$exe")) { throw "clang$exe missing" }
+          if (-not (Test-Path "$root/bin/ld.lld$exe")) { throw "ld.lld$exe missing" }
+          if (-not (Test-Path "$root/bin/llvm-ar$exe")) { throw "llvm-ar$exe missing" }
+          if (-not (Test-Path "$root/bin/clang++$exe") -and (Test-Path "$root/bin/clang$exe")) {
+            Copy-Item "$root/bin/clang$exe" "$root/bin/clang++$exe"
+          }
+          if (Test-Path "build/lib/clang") {
+            Copy-Item "build/lib/clang" "$root/lib/clang" -Recurse
+          }
+
+          $skip = @("test","tests","docs","examples","benchmarks","utils","cmake","Documentation")
+          function Copy-Needed([string]$src, [string]$dst) {
+            if (-not (Test-Path $src)) { throw "missing $src" }
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Get-ChildItem $src -Force | Where-Object { $skip -notcontains $_.Name } | ForEach-Object {
+              Copy-Item $_.FullName $dst -Recurse -Force
+            }
+          }
+          Copy-Needed "libcxx/include" "$root/libcxx/include"
+          Copy-Needed "libcxx/src" "$root/libcxx/src"
+          Copy-Needed "libcxxabi/include" "$root/libcxxabi/include"
+          Copy-Needed "libcxxabi/src" "$root/libcxxabi/src"
+          Copy-Needed "libunwind/include" "$root/libunwind/include"
+          Copy-Needed "libunwind/src" "$root/libunwind/src"
+          if (Test-Path "libc/include") { Copy-Needed "libc/include" "$root/libc/include" }
+          if (Test-Path "libc/shared") { Copy-Needed "libc/shared" "$root/libc/shared" }
+          if (Test-Path "libc/src/__support") { Copy-Needed "libc/src/__support" "$root/libc/src/__support" }
+          Copy-Needed "libc/hdr" "$root/libc/hdr"
+
+          foreach ($p in @(
+            "$root/lib/clang",
+            "$root/libcxx/include",
+            "$root/libcxx/src",
+            "$root/libcxxabi/include",
+            "$root/libcxxabi/src",
+            "$root/libunwind/include",
+            "$root/libunwind/src",
+            "$root/libc/hdr"
+          )) {
+            if (-not (Test-Path $p)) { throw "package missing $p" }
+          }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path $root -DestinationPath "dist/$root.zip" -Force
+          Get-Item "dist/$root.zip" | Format-List Name, Length
+
+      - name: Smoke-test clang
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          $clang = "${{ matrix.name }}/bin/clang$exe"
+          $out = & $clang --version 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "clang") { throw "unexpected clang --version" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [build]
+    if: >
+      always() &&
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Determine release tag
+        id: meta
+        shell: bash
+        run: |
+          ls -la dist || true
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            moving=false
+          else
+            tag="latest"
+            moving=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "moving=$moving" >> "$GITHUB_OUTPUT"
+          shopt -s nullglob
+          zips=(dist/xbox360-*.zip)
+          if [[ ${#zips[@]} -eq 0 ]]; then
+            echo "no host zips produced" >&2
+            exit 1
+          fi
+
+      - name: Move the rolling latest release
+        if: steps.meta.outputs.moving == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest --repo "${{ github.repository }}" --cleanup-tag --yes || true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Xbox 360 clang ${{ steps.meta.outputs.tag }}
+          make_latest: true
+          generate_release_notes: true
+          files: dist/xbox360-*.zip
