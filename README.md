@@ -19,9 +19,13 @@ applied directly, rather than carried as external `.patch` files.
 ## CI
 
 - **Xbox 360 clang** (`build-xbox360-clang.yml`) — builds on push to `xbox360`, publishes
-  `xbox360-<os>-<arch>.zip` to the moving `latest` release. Consumed by RXDK-360.
+  `xbox360-<os>-<arch>.zip` to the `latest` release. Consumed by RXDK-360.
 - **Original Xbox clang** (`build-xboxog-clang.yml`) — builds on push to `xboxog`, publishes
-  `xboxog-<os>-<arch>.zip` to the moving `latest` release. Not currently consumed by anything
+  `xboxog-<os>-<arch>.zip` to the `latest` release. Not currently consumed by anything
   (RXDK-Libs uses Zig's bundled toolchain) — built for future use.
+
+Both pipelines **share the one `latest` release**. Neither deletes it: each upload replaces only
+its own `<platform>-<os>-<arch>.zip` assets, so the other platform's zips stay in place. That also
+means the `latest` tag stays where it was first created rather than tracking either branch's head.
 
 Both are also manually dispatchable from this branch's Actions tab.
