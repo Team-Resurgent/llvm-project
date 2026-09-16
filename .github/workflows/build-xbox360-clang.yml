@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 # Build the Xbox 360 (MS-PPC) clang + lld for each host OS/arch and publish
-# a moving "latest" GitHub Release. The compiler always targets
+# into the shared "latest" GitHub Release, alongside the original Xbox zips
+# from build-xboxog-clang.yml. The compiler always targets
 # powerpc-unknown-xbox360; host zips are named xbox360-<os>-<arch>.
 
 name: Xbox 360 clang
@@ -225,7 +226,7 @@ jobs:
     if: >
       always() &&
       !cancelled() &&
-      (github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch)
+      (github.event_name == 'workflow_dispatch' || github.ref_name == 'xbox360')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -243,13 +244,10 @@ jobs:
           ls -la dist || true
           if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
             tag="${{ github.event.inputs.release_tag }}"
-            moving=false
           else
             tag="latest"
-            moving=true
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "moving=$moving" >> "$GITHUB_OUTPUT"
           shopt -s nullglob
           zips=(dist/xbox360-*.zip)
           if [[ ${#zips[@]} -eq 0 ]]; then
@@ -257,18 +255,20 @@ jobs:
             exit 1
           fi
 
-      - name: Move the rolling latest release
-        if: steps.meta.outputs.moving == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release delete latest --repo "${{ github.repository }}" --cleanup-tag --yes || true
-
+      # The release is NOT deleted first: the original Xbox pipeline shares it.
+      # Uploading replaces same-named assets only, so xboxog-*.zip survives.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Xbox 360 clang ${{ steps.meta.outputs.tag }}
+          name: Team Resurgent clang ${{ steps.meta.outputs.tag }}
           make_latest: true
-          generate_release_notes: true
+          body: |
+            Rolling clang/lld builds for Team Resurgent's Xbox targets.
+
+            - `xbox360-<os>-<arch>.zip` - Xbox 360, target `powerpc-unknown-xbox360` (branch `xbox360`)
+            - `xboxog-<os>-<arch>.zip` - original Xbox, target `i686-pc-windows-gnu` (branch `xboxog`)
+
+            Each pipeline replaces only its own zips, so both sets live here.
           files: dist/xbox360-*.zip
