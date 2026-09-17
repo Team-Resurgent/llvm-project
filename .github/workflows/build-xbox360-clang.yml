@@ -51,6 +51,10 @@ jobs:
       - name: Checkout (compiler cone)
         uses: actions/checkout@v4
         with:
+          # teamresurgent is a thin CI-only branch (no llvm/ source); when run via
+          # workflow_dispatch from the default branch, pin the checkout to the xbox360
+          # source branch so there is something to build.
+          ref: xbox360
           fetch-depth: 1
           sparse-checkout-cone-mode: true
           sparse-checkout: |
