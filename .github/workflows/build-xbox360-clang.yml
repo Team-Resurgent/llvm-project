@@ -144,13 +144,13 @@ jobs:
         shell: cmd
         run: |
           call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
-          cmake --build build --target clang lld llc llvm-ar
+          cmake --build build --target clang lld llc llvm-ar llvm-lib
           if errorlevel 1 exit /b 1
 
       - name: Build clang + lld (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: cmake --build build --target clang lld llc llvm-ar
+        run: cmake --build build --target clang lld llc llvm-ar llvm-lib
 
       - name: Package
         shell: pwsh
@@ -158,13 +158,14 @@ jobs:
           $root = "${{ matrix.name }}"
           $exe = if ($IsWindows) { ".exe" } else { "" }
           New-Item -ItemType Directory -Force -Path "$root/bin","$root/lib" | Out-Null
-          foreach ($n in @("clang","clang++","ld.lld","lld","llvm-ar","llc")) {
+          foreach ($n in @("clang","clang++","ld.lld","lld","llvm-ar","llvm-lib","llc")) {
             $src = "build/bin/$n$exe"
             if (Test-Path $src) { Copy-Item $src "$root/bin/" }
           }
           if (-not (Test-Path "$root/bin/clang$exe")) { throw "clang$exe missing" }
           if (-not (Test-Path "$root/bin/ld.lld$exe")) { throw "ld.lld$exe missing" }
           if (-not (Test-Path "$root/bin/llvm-ar$exe")) { throw "llvm-ar$exe missing" }
+          if (-not (Test-Path "$root/bin/llvm-lib$exe")) { throw "llvm-lib$exe missing" }
           if (-not (Test-Path "$root/bin/clang++$exe") -and (Test-Path "$root/bin/clang$exe")) {
             Copy-Item "$root/bin/clang$exe" "$root/bin/clang++$exe"
           }
