@@ -1000,6 +1000,15 @@ StmtResult Sema::ActOnMSAsmStmt(SourceLocation AsmLoc, SourceLocation LBraceLoc,
   bool IsSimple = (NumOutputs != 0 || NumInputs != 0);
   setFunctionHasBranchProtectedScope();
 
+  // MS-style asm operands that name locals are marked for deferred odr-use while
+  // the block is parsed (LookupInlineAsmIdentifier -> ActOnIdExpression). Unlike
+  // the GCC asm path (BuildGCCAsmStmt), this builder never drained them, so the
+  // pending entries survived to the end of the enclosing function body and
+  // tripped the `MaybeODRUseExprs.empty()` assertion in ActOnFinishFunctionBody
+  // (an assertions-build crash on any `__asm { ... [local] ... }`). Finalize the
+  // odr-use here, mirroring BuildGCCAsmStmt's CleanupVarDeclMarking() call.
+  CleanupVarDeclMarking();
+
   bool InvalidOperand = false;
   for (uint64_t I = 0; I < NumOutputs + NumInputs; ++I) {
     Expr *E = Exprs[I];
