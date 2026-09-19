@@ -1,0 +1,246 @@
+// -*- C++ -*-
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// <stacktrace> (C++23, [stacktrace], P0881).
+//
+// Not yet implemented in upstream libc++; provided by the RXDK-360 llvm fork.
+// Stack capture uses the libunwind _Unwind_Backtrace already linked for EH.
+// Symbolization (function name / source file / line) is not available at runtime
+// on the console -- description()/source_file() return the empty string and
+// source_line() returns 0, which [stacktrace.entry] explicitly permits. The
+// captured native_handle()s (return addresses) can be symbolized offline against
+// the title's ELF.
+//
+//===----------------------------------------------------------------------===//
+#ifndef _LIBCPP_STACKTRACE
+#define _LIBCPP_STACKTRACE
+
+#include <__config>
+#include <__functional/hash.h>
+#include <__fwd/ostream.h>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#  pragma GCC system_header
+#endif
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+#if _LIBCPP_STD_VER >= 23
+
+// The two libunwind entry points we need (always linked for C++ exceptions).
+struct _Unwind_Context;
+extern "C" _LIBCPP_EXPORTED_FROM_ABI int _Unwind_Backtrace(int (*)(_Unwind_Context*, void*), void*);
+extern "C" _LIBCPP_EXPORTED_FROM_ABI uintptr_t _Unwind_GetIP(_Unwind_Context*);
+
+class stacktrace_entry {
+  uintptr_t __addr_ = 0;
+
+  template <class _Allocator>
+  friend class basic_stacktrace;
+
+public:
+  using native_handle_type = uintptr_t;
+
+  constexpr stacktrace_entry() noexcept                                    = default;
+  constexpr stacktrace_entry(const stacktrace_entry&) noexcept             = default;
+  constexpr stacktrace_entry& operator=(const stacktrace_entry&) noexcept  = default;
+  ~stacktrace_entry()                                                      = default;
+
+  [[nodiscard]] constexpr native_handle_type native_handle() const noexcept { return __addr_; }
+  constexpr explicit operator bool() const noexcept { return __addr_ != 0; }
+
+  // No runtime symbolizer on the console: empty is a permitted result.
+  _LIBCPP_HIDE_FROM_ABI string description() const { return string(); }
+  _LIBCPP_HIDE_FROM_ABI string source_file() const { return string(); }
+  _LIBCPP_HIDE_FROM_ABI uint_least32_t source_line() const { return 0; }
+
+  friend constexpr bool operator==(const stacktrace_entry& __x, const stacktrace_entry& __y) noexcept {
+    return __x.__addr_ == __y.__addr_;
+  }
+  friend constexpr strong_ordering operator<=>(const stacktrace_entry& __x, const stacktrace_entry& __y) noexcept {
+    return __x.__addr_ <=> __y.__addr_;
+  }
+};
+
+template <class _Allocator>
+class basic_stacktrace {
+public:
+  using value_type             = stacktrace_entry;
+  using const_reference        = const value_type&;
+  using reference              = value_type&;
+  using const_iterator         = typename vector<value_type, _Allocator>::const_iterator;
+  using iterator               = const_iterator;
+  using reverse_iterator       = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+  using difference_type        = ptrdiff_t;
+  using size_type              = size_t;
+  using allocator_type         = _Allocator;
+
+private:
+  vector<value_type, _Allocator> __frames_;
+
+  struct __capture_state {
+    stacktrace_entry* __buf_;
+    size_t __n_;
+    size_t __max_;
+  };
+  _LIBCPP_HIDE_FROM_ABI static int __trace_cb(_Unwind_Context* __ctx, void* __v) {
+    auto* __s = static_cast<__capture_state*>(__v);
+    if (__s->__n_ >= __s->__max_)
+      return 5; // _URC_END_OF_STACK: stop
+    __s->__buf_[__s->__n_].__addr_ = _Unwind_GetIP(__ctx);
+    ++__s->__n_;
+    return 0; // _URC_NO_REASON: continue
+  }
+
+public:
+  _LIBCPP_HIDE_FROM_ABI basic_stacktrace() noexcept(is_nothrow_default_constructible_v<_Allocator>) = default;
+  _LIBCPP_HIDE_FROM_ABI explicit basic_stacktrace(const _Allocator& __alloc) noexcept : __frames_(__alloc) {}
+  _LIBCPP_HIDE_FROM_ABI basic_stacktrace(const basic_stacktrace&)                = default;
+  _LIBCPP_HIDE_FROM_ABI basic_stacktrace(basic_stacktrace&&) noexcept            = default;
+  _LIBCPP_HIDE_FROM_ABI basic_stacktrace& operator=(const basic_stacktrace&)     = default;
+  _LIBCPP_HIDE_FROM_ABI basic_stacktrace& operator=(basic_stacktrace&&) noexcept = default;
+  _LIBCPP_HIDE_FROM_ABI ~basic_stacktrace()                                      = default;
+
+  _LIBCPP_HIDE_FROM_ABI allocator_type get_allocator() const noexcept { return __frames_.get_allocator(); }
+
+  static constexpr size_t __k_max_frames = 256;
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI static basic_stacktrace
+  current(const allocator_type& __alloc = allocator_type()) noexcept {
+    return current(0, __k_max_frames, __alloc);
+  }
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI static basic_stacktrace
+  current(size_type __skip, const allocator_type& __alloc = allocator_type()) noexcept {
+    return current(__skip, __k_max_frames, __alloc);
+  }
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI static basic_stacktrace
+  current(size_type __skip, size_type __max_depth, const allocator_type& __alloc = allocator_type()) noexcept {
+    basic_stacktrace __result(__alloc);
+    stacktrace_entry __raw[__k_max_frames];
+    __capture_state __state{__raw, 0, __k_max_frames};
+    _Unwind_Backtrace(&__trace_cb, &__state);
+    // Drop this frame + current()/callback overhead the caller asked to skip.
+    size_type __begin = (__skip + 1 < __state.__n_) ? (__skip + 1) : __state.__n_;
+    size_type __count = __state.__n_ - __begin;
+    if (__count > __max_depth)
+      __count = __max_depth;
+#  if _LIBCPP_HAS_EXCEPTIONS
+    try {
+#  endif
+      __result.__frames_.reserve(__count);
+      for (size_type __i = 0; __i < __count; ++__i)
+        __result.__frames_.push_back(__raw[__begin + __i]);
+#  if _LIBCPP_HAS_EXCEPTIONS
+    } catch (...) {
+      __result.__frames_.clear();
+    }
+#  endif
+    return __result;
+  }
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI size_type size() const noexcept { return __frames_.size(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI bool empty() const noexcept { return __frames_.empty(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI size_type max_size() const noexcept { return __frames_.max_size(); }
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_reference operator[](size_type __i) const { return __frames_[__i]; }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_reference at(size_type __i) const { return __frames_.at(__i); }
+
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_iterator begin() const noexcept { return __frames_.begin(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_iterator end() const noexcept { return __frames_.end(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_iterator cbegin() const noexcept { return __frames_.cbegin(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_iterator cend() const noexcept { return __frames_.cend(); }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  [[nodiscard]] _LIBCPP_HIDE_FROM_ABI const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  _LIBCPP_HIDE_FROM_ABI void swap(basic_stacktrace& __other) noexcept { __frames_.swap(__other.__frames_); }
+
+  friend bool operator==(const basic_stacktrace& __x, const basic_stacktrace& __y) noexcept {
+    return __x.__frames_ == __y.__frames_;
+  }
+};
+
+using stacktrace = basic_stacktrace<allocator<stacktrace_entry>>;
+
+template <class _Allocator>
+_LIBCPP_HIDE_FROM_ABI void swap(basic_stacktrace<_Allocator>& __x, basic_stacktrace<_Allocator>& __y) noexcept {
+  __x.swap(__y);
+}
+
+// to_string / formatting: with no symbolizer we print the frame index and the
+// captured address, which is enough to symbolize offline.
+_LIBCPP_HIDE_FROM_ABI inline string to_string(const stacktrace_entry& __f) {
+  char __buf[19];
+  uintptr_t __a = __f.native_handle();
+  const char* __hex = "0123456789abcdef";
+  __buf[0] = '0';
+  __buf[1] = 'x';
+  for (int __i = 0; __i < 16; ++__i)
+    __buf[2 + __i] = __hex[(__a >> ((15 - __i) * 4)) & 0xF];
+  __buf[18] = '\0';
+  return string(__buf);
+}
+
+template <class _Allocator>
+_LIBCPP_HIDE_FROM_ABI string to_string(const basic_stacktrace<_Allocator>& __st) {
+  string __result;
+  for (size_t __i = 0; __i < __st.size(); ++__i) {
+    __result += std::to_string(__i);
+    __result += "# ";
+    __result += std::to_string(__st[__i]);
+    __result += '\n';
+  }
+  return __result;
+}
+
+template <class _CharT, class _Traits>
+_LIBCPP_HIDE_FROM_ABI basic_ostream<_CharT, _Traits>&
+operator<<(basic_ostream<_CharT, _Traits>& __os, const stacktrace_entry& __f) {
+  return __os << std::to_string(__f);
+}
+
+template <class _CharT, class _Traits, class _Allocator>
+_LIBCPP_HIDE_FROM_ABI basic_ostream<_CharT, _Traits>&
+operator<<(basic_ostream<_CharT, _Traits>& __os, const basic_stacktrace<_Allocator>& __st) {
+  return __os << std::to_string(__st);
+}
+
+template <>
+struct hash<stacktrace_entry> {
+  _LIBCPP_HIDE_FROM_ABI size_t operator()(const stacktrace_entry& __e) const noexcept {
+    return hash<uintptr_t>()(__e.native_handle());
+  }
+};
+
+template <class _Allocator>
+struct hash<basic_stacktrace<_Allocator>> {
+  _LIBCPP_HIDE_FROM_ABI size_t operator()(const basic_stacktrace<_Allocator>& __st) const noexcept {
+    size_t __h = 0;
+    for (const auto& __f : __st)
+      __h ^= hash<stacktrace_entry>()(__f) + 0x9e3779b9 + (__h << 6) + (__h >> 2);
+    return __h;
+  }
+};
+
+#endif // _LIBCPP_STD_VER >= 23
+
+_LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_STACKTRACE
