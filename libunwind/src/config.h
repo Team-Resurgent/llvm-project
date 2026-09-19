@@ -40,7 +40,14 @@
 #elif defined(_LIBUNWIND_IS_BAREMETAL)
   #if !defined(_LIBUNWIND_ARM_EHABI)
     #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
+    // RXDK-360 (Xbox 360 XEX): lld does not synthesise a .eh_frame_hdr for this
+    // PE target, so there is no DWARF binary-search index. Leaving DWARF_INDEX
+    // on made libunwind consult an empty index and never fall back, so every
+    // throw terminated. Disable it -> libunwind scans .eh_frame linearly (whose
+    // true length we recover from the PE section table in AddressSpace.hpp).
+    #ifndef _LIBUNWIND_XBOX360_NO_EH_FRAME_HDR
     #define _LIBUNWIND_SUPPORT_DWARF_INDEX 1
+    #endif
   #endif
 #elif defined(__BIONIC__) && defined(_LIBUNWIND_ARM_EHABI)
   // For ARM EHABI, Bionic didn't implement dl_iterate_phdr until API 21. After
