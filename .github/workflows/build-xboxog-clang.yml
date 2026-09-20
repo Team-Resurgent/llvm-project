@@ -154,6 +154,27 @@ jobs:
         shell: bash
         run: cmake --build build --target clang lld llc llvm-ar llvm-lib
 
+      # Make the shipped clang host-capable on Windows: fetch an llvm-mingw release
+      # (a cross toolchain carrying every target's sysroot) so the Package step can
+      # bundle a mingw sysroot. Then `clang --target=<arch>-w64-mingw32 --sysroot
+      # <pkg>/host-sysroot` builds native host tools with no MSVC. Target-agnostic,
+      # so xboxog and xbox360 use the identical step. Linux/macOS need nothing (the
+      # system sysroot builds host tools).
+      - name: Fetch mingw host sysroot (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rel = Invoke-RestMethod https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest `
+                   -Headers @{ 'User-Agent' = 'rxdk-ci' }
+          $asset = $rel.assets | Where-Object { $_.name -match 'ucrt-x86_64\.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw "no llvm-mingw ucrt-x86_64 asset" }
+          Write-Host "llvm-mingw: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile mingw.zip
+          Expand-Archive mingw.zip -DestinationPath mingw-extract -Force
+          $mroot = (Get-ChildItem mingw-extract -Directory | Select-Object -First 1).FullName
+          echo "MINGW_ROOT=$mroot" >> $env:GITHUB_ENV
+
       - name: Package
         shell: pwsh
         run: |
@@ -207,6 +228,29 @@ jobs:
             if (-not (Test-Path $p)) { throw "package missing $p" }
           }
 
+          # Host sysroot (Windows only): assemble a trimmed mingw sysroot under
+          # $root/host-sysroot so the shipped clang can build native host tools.
+          # Keep only this package's host arch + the c++/mingw headers + the
+          # compiler-rt builtins; drop the other targets, sanitizers and fuzzer.
+          if ($IsWindows) {
+            $mroot = $env:MINGW_ROOT
+            if (-not $mroot -or -not (Test-Path $mroot)) { throw "MINGW_ROOT not set/found" }
+            $arch = if ($root -like '*arm64*') { 'aarch64' } else { 'x86_64' }
+            $triple = "$arch-w64-mingw32"
+            $sr = "$root/host-sysroot"
+            New-Item -ItemType Directory -Force -Path $sr | Out-Null
+            Copy-Item "$mroot/include" "$sr/include" -Recurse -Force
+            Copy-Item "$mroot/$triple" "$sr/$triple" -Recurse -Force
+            $rt = Get-ChildItem "$mroot/lib/clang" -Directory | Select-Object -First 1
+            $rtdst = "$sr/lib/clang/$($rt.Name)/lib/windows"
+            New-Item -ItemType Directory -Force -Path $rtdst | Out-Null
+            Get-ChildItem "$($rt.FullName)/lib/windows/libclang_rt.builtins-*.a" |
+              Copy-Item -Destination $rtdst -Force
+            if (-not (Test-Path "$sr/include/stdio.h")) { throw "host-sysroot missing stdio.h" }
+            if (-not (Test-Path "$sr/$triple/lib/crt2.o")) { throw "host-sysroot missing crt2.o" }
+            Write-Host "host-sysroot bundled ($triple)"
+          }
+
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path $root -DestinationPath "dist/$root.zip" -Force
           Get-Item "dist/$root.zip" | Format-List Name, Length
@@ -219,6 +263,24 @@ jobs:
           $out = & $clang --version 2>&1 | Out-String
           Write-Host $out
           if ($out -notmatch "clang") { throw "unexpected clang --version" }
+
+          # Host-compile check: the packaged clang must build a native host exe.
+          # Windows goes through the bundled mingw sysroot; Unix uses the system one.
+          '#include <stdio.h>' | Out-File -Encoding ascii hosttest.c
+          'int main(void){puts("rxdk host clang ok");return 0;}' | Add-Content hosttest.c
+          if ($IsWindows) {
+            $arch = if ('${{ matrix.name }}' -like '*arm64*') { 'aarch64' } else { 'x86_64' }
+            $sr = (Resolve-Path "${{ matrix.name }}/host-sysroot").Path
+            $rd = (Get-ChildItem "$sr/lib/clang" -Directory | Select-Object -First 1).FullName
+            & $clang --target="$arch-w64-mingw32" -fuse-ld=lld --sysroot="$sr" `
+              "-resource-dir=$rd" --rtlib=compiler-rt --unwindlib=libunwind `
+              hosttest.c -o hosttest$exe
+          } else {
+            & $clang hosttest.c -o hosttest$exe
+          }
+          if ($LASTEXITCODE -ne 0) { throw "host compile failed" }
+          if (-not (Test-Path "hosttest$exe")) { throw "no host exe produced" }
+          Write-Host "host exe built OK"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
