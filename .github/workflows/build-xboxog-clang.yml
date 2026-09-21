@@ -69,6 +69,7 @@ jobs:
             libunwind
             libcxx
             libcxxabi
+            compiler-rt
 
       - name: Install Ninja (Unix)
         if: runner.os != 'Windows'
@@ -146,74 +147,151 @@ jobs:
         shell: cmd
         run: |
           call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
-          cmake --build build --target clang lld llc llvm-ar llvm-lib
+          cmake --build build --target clang lld llc llvm-ar llvm-lib llvm-nm llvm-ranlib llvm-objdump llvm-rc
           if errorlevel 1 exit /b 1
 
       - name: Build clang + lld (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: cmake --build build --target clang lld llc llvm-ar llvm-lib
+        run: cmake --build build --target clang lld llc llvm-ar llvm-lib llvm-nm llvm-ranlib llvm-objdump llvm-rc
 
-      # compiler-rt builtins the title link needs. The build above does not build compiler-rt,
-      # and a title is linked -nostdlib (clang then provides no builtins), so the SDK libs' 64-bit
-      # integer helpers (__divdi3/__udivdi3/__moddi3/__umoddi3, from libcompat's __alldiv shim and
-      # picolibc's __ultoa_invert) plus the i386 stack probes (__alloca/__chkstk) are undefined --
-      # a title fails to link with "undefined symbol: ___divdi3". Compile the classic i386 subset
-      # with the just-built clang for the i686-pc-windows-gnu target and drop the archive into the
-      # clang resource dir (build/lib/clang/<ver>/lib/windows); the Package step's lib/clang copy
-      # then carries it into every platform zip. It is i386 target code, so it is host-agnostic and
-      # the same step runs identically on Windows/macOS/Linux. (Mirrors RXDK-Libs
-      # tools/build-rt-builtins.ps1, which was the manual stopgap until CI shipped this.)
-      - name: Build compiler-rt i386 builtins
+      # compiler-rt builtins for the i686 target. A -nostdlib clang title link (unlike `zig cc`,
+      # which auto-links its bundled compiler-rt) provides no builtins, so the SDK libs' 64-bit
+      # integer helpers (__divdi3/__udivdi3/…) and the i386 stack probe (_alloca/__chkstk) would be
+      # undefined. Build the CANONICAL compiler-rt builtins with the just-built clang so the set is
+      # complete (no hand-maintained subset), and package it in the clang resource dir where the
+      # RXDK engine links it on demand.
+      #
+      # CRITICAL — the Xbox is a Coppermine Pentium III (MMX + SSE1 only); SSE2+ faults as
+      # STATUS_ILLEGAL_INSTRUCTION. Two things bite here:
+      #   1. -march=pentium3 pins CODEGEN of the generic .c builtins to x87 (no SSE2).
+      #   2. compiler-rt STILL prefers its hand-written i386/*.S asm for a few int->float
+      #      conversions (floatdidf/floatdisf/floatdixf/floatundidf/floatundisf/floatundixf), and
+      #      those .S files use SSE2 (movsd xmm) regardless of -march. So after the build we REPLACE
+      #      those 6 objects with the generic .c versions compiled at -march=pentium3 (x87).
+      # The objdump tripwire below then asserts the whole archive is SSE2-free; RXDK-Libs' isa-scan.py
+      # (Capstone) is the authoritative gate downstream.
+      - name: Build compiler-rt builtins (i686, PIII-clean)
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           $exe = if ($IsWindows) { ".exe" } else { "" }
-          $clang = "build/bin/clang$exe"
-          $ar = "build/bin/llvm-ar$exe"
-          $bsrc = "compiler-rt/lib/builtins"
-          if (-not (Test-Path $clang)) { throw "clang not built at $clang" }
-          if (-not (Test-Path $bsrc)) { throw "compiler-rt builtins source missing at $bsrc" }
-          $ver = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
-          if (-not $ver) { throw "no build/lib/clang/<ver> resource dir" }
-          $outDir = Join-Path $ver.FullName "lib/windows"
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          # Integer/fp helper subset only -- NOT emutls/mem/OS builtins, which the RXDK libs define
-          # and would collide with as duplicate strong symbols.
-          $files = @(
-            'divdi3','udivdi3','moddi3','umoddi3','udivmoddi4','divmoddi4',
-            'ashldi3','ashrdi3','lshrdi3','muldi3','negdi2','cmpdi2','ucmpdi2',
-            'floatdidf','floatdisf','floatundidf','floatundisf',
-            'fixdfdi','fixsfdi','fixunsdfdi','fixunssfdi',
-            'floatdixf','floatundixf','fixxfdi','fixunsxfdi',
-            'mulodi4','muloti4','absvdi2','negvdi2'
+          $bin = Join-Path (Get-Location) "build/bin"
+          $clang   = Join-Path $bin "clang$exe"
+          $clangxx = Join-Path $bin "clang++$exe"
+          $ar      = Join-Path $bin "llvm-ar$exe"
+          $ranlib  = Join-Path $bin "llvm-ranlib$exe"
+          $nm      = Join-Path $bin "llvm-nm$exe"
+          $objdump = Join-Path $bin "llvm-objdump$exe"
+          $rc      = Join-Path $bin "llvm-rc$exe"
+          $ninja   = if ($IsWindows) { "${{ steps.vs.outputs.ninja }}" } else { "ninja" }
+          # clang++ is a driver-mode alias of clang; the in-tree build may not create it, so fall
+          # back to clang (which compiles the trivial CXX probe fine given an explicit target).
+          if (-not (Test-Path $clangxx)) { $clangxx = $clang }
+          foreach ($t in @($clang,$clangxx,$ar,$ranlib,$nm,$objdump,$rc)) {
+            if (-not (Test-Path $t)) { throw "missing build tool: $t" }
+          }
+          # CMake writes tool paths verbatim into its CMake*Compiler.cmake files; a Windows path
+          # with backslashes (D:\a\...\llvm-rc.exe) becomes an invalid escape (\a) there. Pass every
+          # path to CMake with forward slashes (accepted on Windows, a no-op on Unix).
+          function Fwd([string]$p) { return ($p -replace '\\','/') }
+          $clang = Fwd $clang; $clangxx = Fwd $clangxx; $ar = Fwd $ar
+          $ranlib = Fwd $ranlib; $nm = Fwd $nm; $objdump = Fwd $objdump; $rc = Fwd $rc
+          $ninja = Fwd $ninja
+
+          # The clang resource dir (build/lib/clang/<ver>) already holds the builtin headers; the
+          # Package step copies the whole tree. Drop the builtins archive into its lib/windows so it
+          # rides along.
+          $verDir = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
+          if ($null -eq $verDir) { throw "no build/lib/clang/<ver> resource dir" }
+          $resWin = Join-Path $verDir.FullName "lib/windows"
+          New-Item -ItemType Directory -Force -Path $resWin | Out-Null
+
+          # A -ffreestanding builtins build has no libc, but int_util.c's <stdlib.h> include is
+          # guarded only by _WIN32 (always set for this target), so provide a 1-decl stub that
+          # satisfies the include (abort() is never actually called — __STDC_HOSTED__==0).
+          $stub = Join-Path (Get-Location) "rt-stub-inc"
+          New-Item -ItemType Directory -Force -Path $stub | Out-Null
+          $stubFwd = $stub -replace '\\','/'   # forward slashes for the -isystem flag in CMAKE_C_FLAGS
+          Set-Content -Path (Join-Path $stub "stdlib.h") -Encoding ascii -Value @(
+            '#ifndef _RXDK_RT_STUB_STDLIB_H',
+            '#define _RXDK_RT_STUB_STDLIB_H',
+            '#ifdef __cplusplus',
+            'extern "C" {',
+            '#endif',
+            '_Noreturn void abort(void);',
+            '#ifdef __cplusplus',
+            '}',
+            '#endif',
+            '#endif'
           )
-          $asm = @('i386/chkstk','i386/chkstk2')   # __chkstk / __chkstk_ms / _alloca
-          $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("rxdk-rt-" + [guid]::NewGuid().ToString('N'))
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-          $objs = @()
-          foreach ($f in $files) {
-            $src = Join-Path $bsrc "$f.c"
-            if (-not (Test-Path $src)) { Write-Warning "no source $f.c"; continue }
-            $obj = Join-Path $tmp "$f.o"
-            & $clang '--target=i686-pc-windows-gnu' '-march=pentium3' '-O2' '-ffreestanding' '-fno-stack-protector' '-c' $src '-o' $obj
-            if ($LASTEXITCODE -ne 0) { throw "compile failed: $f.c" }
-            $objs += $obj
+
+          $bt = "build-builtins-i386"
+          if (Test-Path $bt) { Remove-Item $bt -Recurse -Force }
+          # Standalone compiler-rt builtins build, cross to the i686 windows-gnu target using the
+          # freshly built clang. CMAKE_SYSTEM_NAME=Windows puts CMake in cross mode (the Windows
+          # platform module needs an RC compiler -> llvm-rc); TRY_COMPILE as a static lib avoids
+          # needing a full link/sysroot for the compiler probe; BAREMETAL avoids libc deps.
+          & cmake -G Ninja -S "compiler-rt/lib/builtins" -B $bt `
+            "-DCMAKE_MAKE_PROGRAM=$ninja" `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_SYSTEM_NAME=Windows" `
+            "-DCMAKE_SYSTEM_PROCESSOR=x86" `
+            "-DCMAKE_C_COMPILER=$clang" `
+            "-DCMAKE_CXX_COMPILER=$clangxx" `
+            "-DCMAKE_ASM_COMPILER=$clang" `
+            "-DCMAKE_AR=$ar" `
+            "-DCMAKE_RANLIB=$ranlib" `
+            "-DCMAKE_NM=$nm" `
+            "-DCMAKE_RC_COMPILER=$rc" `
+            "-DCMAKE_C_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_CXX_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_ASM_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" `
+            "-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON" `
+            "-DCOMPILER_RT_BAREMETAL_BUILD=ON" `
+            "-DCOMPILER_RT_INCLUDE_TESTS=OFF" `
+            "-DCMAKE_C_FLAGS=-march=pentium3 -ffreestanding -isystem $stubFwd" `
+            "-DCMAKE_ASM_FLAGS=-march=pentium3"
+          if ($LASTEXITCODE -ne 0) { throw "builtins configure failed" }
+          & cmake --build $bt
+          if ($LASTEXITCODE -ne 0) { throw "builtins build failed" }
+
+          # The archive is clang_rt.builtins-i386.lib (windows-gnu) or libclang_rt.builtins-i386.a.
+          $lib = Get-ChildItem $bt -Recurse -Include "clang_rt.builtins-*.lib","libclang_rt.builtins-*.a" |
+                 Select-Object -First 1
+          if ($null -eq $lib) { throw "builtins archive not produced" }
+          $dest = Join-Path $resWin "libclang_rt.builtins-i386.a"
+          Copy-Item $lib.FullName $dest -Force
+
+          # Swap the 6 SSE2 i386 asm int->float conversions for their generic .c compiled at x87.
+          $fp = @("floatdidf","floatdisf","floatdixf","floatundidf","floatundisf","floatundixf")
+          $swap = Join-Path (Get-Location) "rt-swap"
+          if (Test-Path $swap) { Remove-Item $swap -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $swap | Out-Null
+          foreach ($f in $fp) {
+            & $clang "--target=i686-pc-windows-gnu" "-march=pentium3" "-O2" "-ffreestanding" `
+              "-fno-stack-protector" "-c" "compiler-rt/lib/builtins/$f.c" "-o" (Join-Path $swap "$f.c.o")
+            if ($LASTEXITCODE -ne 0) { throw "recompile $f.c failed" }
+            # Drop the SSE2 asm object; the member suffix follows the target (.obj for windows),
+            # so try both. A no-op if absent -> the tripwire below still catches any SSE2 left in.
+            & $ar d $dest "$f.S.obj" 2>$null
+            & $ar d $dest "$f.S.o"   2>$null
           }
-          foreach ($f in $asm) {
-            $src = Join-Path $bsrc "$f.S"
-            if (-not (Test-Path $src)) { Write-Warning "no source $f.S"; continue }
-            $obj = Join-Path $tmp (($f -replace '[\\/]','_') + ".o")
-            & $clang '--target=i686-pc-windows-gnu' '-march=pentium3' '-c' $src '-o' $obj
-            if ($LASTEXITCODE -ne 0) { throw "assemble failed: $f.S" }
-            $objs += $obj
+          & $ar r $dest (Get-ChildItem $swap -Filter *.c.o | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw "archive swap failed" }
+          Write-Host "builtins -> $dest ($((& $ar t $dest | Measure-Object).Count) members)"
+
+          # PIII tripwire: a pentium3 + x87 archive must be MMX+SSE1 at most. Fail loudly on any
+          # SSE2/AVX (the int + x87 conversion builtins use no XMM at all after the swap).
+          $asm = & $objdump -d $dest 2>&1 | Out-String
+          $bad = [regex]::Matches($asm,
+            '(?im)^\s*[0-9a-f]+:\s+.*?\b(v[a-z]+|movsd|movapd|movupd|movdqa|movdqu|punpck[lh]qdq|paddq|psubq|pmuludq|cvtsi2sd|cvtsd2ss|cvtss2sd|cvttsd2si|cvtsd2si|cvtpd2|cvtps2pd|cvtdq2pd|addsd|subsd|mulsd|divsd|sqrtsd|comisd|ucomisd|minsd|maxsd|andpd|orpd|xorpd|shufpd)\b')
+          if ($bad.Count -gt 0) {
+            Write-Host "ISA VIOLATION — SSE2+/AVX in builtins (first few):"
+            $bad | Select-Object -First 8 | ForEach-Object { Write-Host ("  " + $_.Value.Trim()) }
+            throw "compiler-rt builtins contain post-PIII instructions"
           }
-          $outLib = Join-Path $outDir "libclang_rt.builtins-i386.a"
-          if (Test-Path $outLib) { Remove-Item $outLib -Force }
-          & $ar rcs $outLib @objs
-          if ($LASTEXITCODE -ne 0) { throw "archiving failed" }
-          if (-not (Test-Path $outLib)) { throw "builtins archive not produced" }
-          Write-Host ("OK  {0}  ({1} objects)" -f $outLib, $objs.Count)
+          Write-Host "isa tripwire: clean (no SSE2+/AVX)"
 
       # Make the shipped clang host-capable on Windows: fetch an llvm-mingw release
       # (a cross toolchain carrying every target's sysroot) so the Package step can
@@ -257,6 +335,10 @@ jobs:
           if (Test-Path "build/lib/clang") {
             Copy-Item "build/lib/clang" "$root/lib/clang" -Recurse
           }
+          # The compiler-rt builtins archive must have ridden along inside lib/clang/<ver>/lib/windows.
+          $builtins = Get-ChildItem "$root/lib/clang" -Recurse -Filter "libclang_rt.builtins-i386.a" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $builtins) { throw "package missing libclang_rt.builtins-i386.a (builtins step did not stage it)" }
+          Write-Host "packaged builtins: $($builtins.FullName)"
 
           $skip = @("test","tests","docs","examples","benchmarks","utils","cmake","Documentation")
           function Copy-Needed([string]$src, [string]$dst) {
@@ -288,11 +370,6 @@ jobs:
             "$root/libc/hdr"
           )) {
             if (-not (Test-Path $p)) { throw "package missing $p" }
-          }
-          # The i386 compiler-rt builtins must have landed in the resource dir (see the builtins
-          # step); without it every title link fails with undefined ___divdi3. Fail loudly here.
-          if (-not (Get-ChildItem "$root/lib/clang" -Recurse -Filter 'libclang_rt.builtins-i386.a' -ErrorAction SilentlyContinue)) {
-            throw "package missing libclang_rt.builtins-i386.a under $root/lib/clang"
           }
 
           # Host sysroot (Windows only): assemble a trimmed mingw sysroot under
