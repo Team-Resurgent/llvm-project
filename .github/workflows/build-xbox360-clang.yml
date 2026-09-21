@@ -161,14 +161,15 @@ jobs:
       - name: Fetch mingw host sysroot (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $rel = Invoke-RestMethod https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest `
-                   -Headers @{ 'User-Agent' = 'rxdk-ci' }
-          $asset = $rel.assets | Where-Object { $_.name -match 'ucrt-x86_64\.zip$' } | Select-Object -First 1
-          if (-not $asset) { throw "no llvm-mingw ucrt-x86_64 asset" }
-          Write-Host "llvm-mingw: $($asset.name)"
-          Invoke-WebRequest $asset.browser_download_url -OutFile mingw.zip
+          # gh authenticates via GH_TOKEN, avoiding the low unauthenticated GitHub
+          # API rate limit that shared runner IPs hit (the previous Invoke-RestMethod
+          # to /releases/latest failed with "API rate limit exceeded").
+          gh release download latest --repo mstorsjo/llvm-mingw `
+            --pattern '*ucrt-x86_64.zip' --output mingw.zip --clobber
           Expand-Archive mingw.zip -DestinationPath mingw-extract -Force
           $mroot = (Get-ChildItem mingw-extract -Directory | Select-Object -First 1).FullName
           echo "MINGW_ROOT=$mroot" >> $env:GITHUB_ENV
