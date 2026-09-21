@@ -154,6 +154,67 @@ jobs:
         shell: bash
         run: cmake --build build --target clang lld llc llvm-ar llvm-lib
 
+      # compiler-rt builtins the title link needs. The build above does not build compiler-rt,
+      # and a title is linked -nostdlib (clang then provides no builtins), so the SDK libs' 64-bit
+      # integer helpers (__divdi3/__udivdi3/__moddi3/__umoddi3, from libcompat's __alldiv shim and
+      # picolibc's __ultoa_invert) plus the i386 stack probes (__alloca/__chkstk) are undefined --
+      # a title fails to link with "undefined symbol: ___divdi3". Compile the classic i386 subset
+      # with the just-built clang for the i686-pc-windows-gnu target and drop the archive into the
+      # clang resource dir (build/lib/clang/<ver>/lib/windows); the Package step's lib/clang copy
+      # then carries it into every platform zip. It is i386 target code, so it is host-agnostic and
+      # the same step runs identically on Windows/macOS/Linux. (Mirrors RXDK-Libs
+      # tools/build-rt-builtins.ps1, which was the manual stopgap until CI shipped this.)
+      - name: Build compiler-rt i386 builtins
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          $clang = "build/bin/clang$exe"
+          $ar = "build/bin/llvm-ar$exe"
+          $bsrc = "compiler-rt/lib/builtins"
+          if (-not (Test-Path $clang)) { throw "clang not built at $clang" }
+          if (-not (Test-Path $bsrc)) { throw "compiler-rt builtins source missing at $bsrc" }
+          $ver = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
+          if (-not $ver) { throw "no build/lib/clang/<ver> resource dir" }
+          $outDir = Join-Path $ver.FullName "lib/windows"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          # Integer/fp helper subset only -- NOT emutls/mem/OS builtins, which the RXDK libs define
+          # and would collide with as duplicate strong symbols.
+          $files = @(
+            'divdi3','udivdi3','moddi3','umoddi3','udivmoddi4','divmoddi4',
+            'ashldi3','ashrdi3','lshrdi3','muldi3','negdi2','cmpdi2','ucmpdi2',
+            'floatdidf','floatdisf','floatundidf','floatundisf',
+            'fixdfdi','fixsfdi','fixunsdfdi','fixunssfdi',
+            'floatdixf','floatundixf','fixxfdi','fixunsxfdi',
+            'mulodi4','muloti4','absvdi2','negvdi2'
+          )
+          $asm = @('i386/chkstk','i386/chkstk2')   # __chkstk / __chkstk_ms / _alloca
+          $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("rxdk-rt-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $objs = @()
+          foreach ($f in $files) {
+            $src = Join-Path $bsrc "$f.c"
+            if (-not (Test-Path $src)) { Write-Warning "no source $f.c"; continue }
+            $obj = Join-Path $tmp "$f.o"
+            & $clang '--target=i686-pc-windows-gnu' '-march=pentium3' '-O2' '-ffreestanding' '-fno-stack-protector' '-c' $src '-o' $obj
+            if ($LASTEXITCODE -ne 0) { throw "compile failed: $f.c" }
+            $objs += $obj
+          }
+          foreach ($f in $asm) {
+            $src = Join-Path $bsrc "$f.S"
+            if (-not (Test-Path $src)) { Write-Warning "no source $f.S"; continue }
+            $obj = Join-Path $tmp (($f -replace '[\\/]','_') + ".o")
+            & $clang '--target=i686-pc-windows-gnu' '-march=pentium3' '-c' $src '-o' $obj
+            if ($LASTEXITCODE -ne 0) { throw "assemble failed: $f.S" }
+            $objs += $obj
+          }
+          $outLib = Join-Path $outDir "libclang_rt.builtins-i386.a"
+          if (Test-Path $outLib) { Remove-Item $outLib -Force }
+          & $ar rcs $outLib @objs
+          if ($LASTEXITCODE -ne 0) { throw "archiving failed" }
+          if (-not (Test-Path $outLib)) { throw "builtins archive not produced" }
+          Write-Host ("OK  {0}  ({1} objects)" -f $outLib, $objs.Count)
+
       # Make the shipped clang host-capable on Windows: fetch an llvm-mingw release
       # (a cross toolchain carrying every target's sysroot) so the Package step can
       # bundle a mingw sysroot. Then `clang --target=<arch>-w64-mingw32 --sysroot
@@ -227,6 +288,11 @@ jobs:
             "$root/libc/hdr"
           )) {
             if (-not (Test-Path $p)) { throw "package missing $p" }
+          }
+          # The i386 compiler-rt builtins must have landed in the resource dir (see the builtins
+          # step); without it every title link fails with undefined ___divdi3. Fail loudly here.
+          if (-not (Get-ChildItem "$root/lib/clang" -Recurse -Filter 'libclang_rt.builtins-i386.a' -ErrorAction SilentlyContinue)) {
+            throw "package missing libclang_rt.builtins-i386.a under $root/lib/clang"
           }
 
           # Host sysroot (Windows only): assemble a trimmed mingw sysroot under
