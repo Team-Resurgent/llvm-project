@@ -241,12 +241,17 @@ jobs:
             Copy-Item "$mroot/include" "$sr/include" -Recurse -Force
             Copy-Item "$mroot/$triple" "$sr/$triple" -Recurse -Force
             $rt = Get-ChildItem "$mroot/lib/clang" -Directory | Select-Object -First 1
-            $rtdst = "$sr/lib/clang/$($rt.Name)/lib/windows"
-            New-Item -ItemType Directory -Force -Path $rtdst | Out-Null
+            $rtroot = "$sr/lib/clang/$($rt.Name)"
+            New-Item -ItemType Directory -Force -Path "$rtroot/lib/windows" | Out-Null
+            # Overriding -resource-dir to this bundle means it must carry BOTH the
+            # clang builtin headers (mm_malloc.h, stddef.h, ...) and the host-arch
+            # compiler-rt builtins -- headers alone or builtins alone breaks builds.
+            Copy-Item "$($rt.FullName)/include" "$rtroot/include" -Recurse -Force
             Get-ChildItem "$($rt.FullName)/lib/windows/libclang_rt.builtins-*.a" |
-              Copy-Item -Destination $rtdst -Force
+              Copy-Item -Destination "$rtroot/lib/windows" -Force
             if (-not (Test-Path "$sr/include/stdio.h")) { throw "host-sysroot missing stdio.h" }
             if (-not (Test-Path "$sr/$triple/lib/crt2.o")) { throw "host-sysroot missing crt2.o" }
+            if (-not (Test-Path "$rtroot/include/mm_malloc.h")) { throw "host-sysroot missing builtin headers" }
             Write-Host "host-sysroot bundled ($triple)"
           }
 
@@ -266,7 +271,8 @@ jobs:
           # Host-compile check: the packaged clang must build a native host exe.
           # Windows goes through the bundled mingw sysroot; Unix uses the system one.
           '#include <stdio.h>' | Out-File -Encoding ascii hosttest.c
-          'int main(void){puts("rxdk host clang ok");return 0;}' | Add-Content hosttest.c
+          '#include <stdlib.h>' | Add-Content hosttest.c
+          'int main(void){void*p=malloc(8);free(p);puts("rxdk host clang ok");return p?0:1;}' | Add-Content hosttest.c
           if ($IsWindows) {
             $arch = if ('${{ matrix.name }}' -like '*arm64*') { 'aarch64' } else { 'x86_64' }
             $sr = (Resolve-Path "${{ matrix.name }}/host-sysroot").Path
