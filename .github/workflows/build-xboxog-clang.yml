@@ -170,7 +170,7 @@ jobs:
           # gh authenticates via GH_TOKEN, avoiding the low unauthenticated GitHub
           # API rate limit that shared runner IPs hit (the previous Invoke-RestMethod
           # to /releases/latest failed with "API rate limit exceeded").
-          gh release download latest --repo mstorsjo/llvm-mingw `
+          gh release download --repo mstorsjo/llvm-mingw `
             --pattern '*ucrt-x86_64.zip' --output mingw.zip --clobber
           Expand-Archive mingw.zip -DestinationPath mingw-extract -Force
           $mroot = (Get-ChildItem mingw-extract -Directory | Select-Object -First 1).FullName
