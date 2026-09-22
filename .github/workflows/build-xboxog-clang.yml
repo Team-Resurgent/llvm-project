@@ -385,13 +385,20 @@ jobs:
             New-Item -ItemType Directory -Force -Path $sr | Out-Null
             Copy-Item "$mroot/include" "$sr/include" -Recurse -Force
             Copy-Item "$mroot/$triple" "$sr/$triple" -Recurse -Force
+            # The clang builtin HEADERS must come from THIS build's clang, not from the mingw
+            # package's clang -- they can be different clang snapshots, and a newer header (e.g.
+            # avx512bmmintrin.h) calling a builtin the shipped binary lacks fails every host compile
+            # ("use of undeclared identifier __builtin_ia32_..."). So take the resource-dir include
+            # from build/lib/clang (matches the shipped clang), and only the host-arch compiler-rt
+            # builtins archive from mingw.
+            $ourRt = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
             $rt = Get-ChildItem "$mroot/lib/clang" -Directory | Select-Object -First 1
-            $rtroot = "$sr/lib/clang/$($rt.Name)"
+            $rtroot = "$sr/lib/clang/$($ourRt.Name)"
             New-Item -ItemType Directory -Force -Path "$rtroot/lib/windows" | Out-Null
-            # Overriding -resource-dir to this bundle means it must carry BOTH the
-            # clang builtin headers (mm_malloc.h, stddef.h, ...) and the host-arch
-            # compiler-rt builtins -- headers alone or builtins alone breaks builds.
-            Copy-Item "$($rt.FullName)/include" "$rtroot/include" -Recurse -Force
+            # Overriding -resource-dir to this bundle means it must carry BOTH the clang builtin
+            # headers (mm_malloc.h, stddef.h, ...) AND the host-arch compiler-rt builtins -- headers
+            # alone or builtins alone breaks builds.
+            Copy-Item "$($ourRt.FullName)/include" "$rtroot/include" -Recurse -Force
             Get-ChildItem "$($rt.FullName)/lib/windows/libclang_rt.builtins-*.a" |
               Copy-Item -Destination "$rtroot/lib/windows" -Force
             if (-not (Test-Path "$sr/include/stdio.h")) { throw "host-sysroot missing stdio.h" }
