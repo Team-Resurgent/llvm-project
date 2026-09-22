@@ -1,0 +1,531 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# Build the UNIFIED Team Resurgent Xbox clang + lld for each host OS/arch and
+# publish one combined toolchain into the shared "latest" GitHub Release. A
+# single clang binary carries every target the two consoles need -- PowerPC for
+# the Xbox 360 (powerpc-unknown-xbox360) and X86 for the original Xbox
+# (i686-pc-windows-gnu), plus AArch64 so arm64 hosts self-host -- so ONE
+# xbox-<os>-<arch>.zip replaces the old per-console xboxog-*/xbox360-* zips.
+#
+# The package bundles, from one build:
+#   * clang/clang++/lld/llvm-ar/llvm-lib/llc for the host
+#   * the shared C++ runtime SOURCE (libcxx/libcxxabi/libunwind/libc) both
+#     consoles compile against, with the OG i386 + 360 XEX conventions already
+#     in the tree (branch `xbox`)
+#   * the PIII-clean i386 compiler-rt builtins the OG title link needs
+#   * (Windows) a trimmed mingw host-sysroot so the shipped clang builds native
+#     host tools (torch etc.) with no MSVC
+# The version is a build-timestamp marker asset (xbox_version), restamped every
+# build so consumers' update detection fires without a manual bump.
+
+name: Xbox clang (unified)
+
+on:
+  push:
+    branches: [xbox]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (empty = move the rolling "latest" release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xbox-clang
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: xbox-windows-x64
+            os: windows-2022
+            vcvars: vcvars64.bat
+          - name: xbox-windows-arm64
+            os: windows-11-vs2026-arm
+            vcvars: vcvarsarm64.bat
+          - name: xbox-linux-x64
+            os: ubuntu-24.04
+          - name: xbox-linux-arm64
+            os: ubuntu-24.04-arm
+          - name: xbox-macos-x64
+            os: macos-15-intel
+          - name: xbox-macos-arm64
+            os: macos-15
+    steps:
+      - name: Checkout (compiler cone)
+        uses: actions/checkout@v4
+        with:
+          # teamresurgent is a thin CI-only branch (no llvm/ source); when run via
+          # workflow_dispatch from the default branch, pin the checkout to the xbox
+          # source branch so there is something to build.
+          ref: xbox
+          fetch-depth: 1
+          sparse-checkout-cone-mode: true
+          sparse-checkout: |
+            llvm
+            clang
+            lld
+            cmake
+            compiler-rt
+            third-party
+            libc
+            libunwind
+            libcxx
+            libcxxabi
+
+      - name: Install Ninja (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            brew install ninja
+          fi
+          ninja --version
+
+      - name: Locate VS + Ninja
+        if: runner.os == 'Windows'
+        id: vs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) {
+            $vs = & $vswhere -latest -products * -property installationPath
+          }
+          if (-not $vs) { throw "Visual Studio not found" }
+          $ninja = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+          if (-not (Test-Path $ninja)) { throw "Ninja not found under $vs" }
+          echo "vs=$vs" >> $env:GITHUB_OUTPUT
+          echo "ninja=$ninja" >> $env:GITHUB_OUTPUT
+          echo "VS=$vs"
+          echo "Ninja=$ninja"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
+          cmake -G Ninja -S llvm -B build ^
+            -DCMAKE_MAKE_PROGRAM="${{ steps.vs.outputs.ninja }}" ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DLLVM_ENABLE_PROJECTS="clang;lld" ^
+            -DLLVM_TARGETS_TO_BUILD="PowerPC;X86;AArch64" ^
+            -DLLVM_ENABLE_ASSERTIONS=ON ^
+            -DLLVM_OPTIMIZED_TABLEGEN=ON ^
+            -DLLVM_APPEND_VC_REV=OFF ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DCLANG_INCLUDE_TESTS=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF ^
+            -DLLVM_ENABLE_LIBXML2=OFF
+          if errorlevel 1 exit /b 1
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_TARGETS_TO_BUILD="PowerPC;X86;AArch64" \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_OPTIMIZED_TABLEGEN=ON \
+            -DLLVM_APPEND_VC_REV=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DCLANG_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF
+
+      # llvm-nm/ranlib/objdump/rc are needed by the i386 builtins step below.
+      - name: Build clang + lld (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.vs.outputs.vs }}\VC\Auxiliary\Build\${{ matrix.vcvars }}" || exit /b 1
+          cmake --build build --target clang lld llc llvm-ar llvm-lib llvm-nm llvm-ranlib llvm-objdump llvm-rc
+          if errorlevel 1 exit /b 1
+
+      - name: Build clang + lld (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cmake --build build --target clang lld llc llvm-ar llvm-lib llvm-nm llvm-ranlib llvm-objdump llvm-rc
+
+      # compiler-rt builtins for the i686 (original Xbox) target. A -nostdlib clang title link (unlike
+      # `zig cc`, which auto-links its bundled compiler-rt) provides no builtins, so the SDK libs' 64-bit
+      # integer helpers (__divdi3/__udivdi3/…) and the i386 stack probe (_alloca/__chkstk) would be
+      # undefined. Build the CANONICAL compiler-rt builtins with the just-built clang so the set is
+      # complete (no hand-maintained subset), and package it in the clang resource dir where the
+      # RXDK engine links it on demand. (The 360 links its own runtime; this archive is OG-only but
+      # rides in the one unified package.)
+      #
+      # CRITICAL — the original Xbox is a Coppermine Pentium III (MMX + SSE1 only); SSE2+ faults as
+      # STATUS_ILLEGAL_INSTRUCTION. Two things bite here:
+      #   1. -march=pentium3 pins CODEGEN of the generic .c builtins to x87 (no SSE2).
+      #   2. compiler-rt STILL prefers its hand-written i386/*.S asm for a few int->float
+      #      conversions (floatdidf/floatdisf/floatdixf/floatundidf/floatundisf/floatundixf), and
+      #      those .S files use SSE2 (movsd xmm) regardless of -march. So after the build we REPLACE
+      #      those 6 objects with the generic .c versions compiled at -march=pentium3 (x87).
+      # The objdump tripwire below then asserts the whole archive is SSE2-free; RXDK-Libs' isa-scan.py
+      # (Capstone) is the authoritative gate downstream.
+      - name: Build compiler-rt builtins (i686, PIII-clean)
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          $bin = Join-Path (Get-Location) "build/bin"
+          $clang   = Join-Path $bin "clang$exe"
+          $clangxx = Join-Path $bin "clang++$exe"
+          $ar      = Join-Path $bin "llvm-ar$exe"
+          $ranlib  = Join-Path $bin "llvm-ranlib$exe"
+          $nm      = Join-Path $bin "llvm-nm$exe"
+          $objdump = Join-Path $bin "llvm-objdump$exe"
+          $rc      = Join-Path $bin "llvm-rc$exe"
+          $ninja   = if ($IsWindows) { "${{ steps.vs.outputs.ninja }}" } else { "ninja" }
+          # clang++ is a driver-mode alias of clang; the in-tree build may not create it, so fall
+          # back to clang (which compiles the trivial CXX probe fine given an explicit target).
+          if (-not (Test-Path $clangxx)) { $clangxx = $clang }
+          foreach ($t in @($clang,$clangxx,$ar,$ranlib,$nm,$objdump,$rc)) {
+            if (-not (Test-Path $t)) { throw "missing build tool: $t" }
+          }
+          # CMake writes tool paths verbatim into its CMake*Compiler.cmake files; a Windows path
+          # with backslashes (D:\a\...\llvm-rc.exe) becomes an invalid escape (\a) there. Pass every
+          # path to CMake with forward slashes (accepted on Windows, a no-op on Unix).
+          function Fwd([string]$p) { return ($p -replace '\\','/') }
+          $clang = Fwd $clang; $clangxx = Fwd $clangxx; $ar = Fwd $ar
+          $ranlib = Fwd $ranlib; $nm = Fwd $nm; $objdump = Fwd $objdump; $rc = Fwd $rc
+          $ninja = Fwd $ninja
+
+          # The clang resource dir (build/lib/clang/<ver>) already holds the builtin headers; the
+          # Package step copies the whole tree. Drop the builtins archive into its lib/windows so it
+          # rides along.
+          $verDir = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
+          if ($null -eq $verDir) { throw "no build/lib/clang/<ver> resource dir" }
+          $resWin = Join-Path $verDir.FullName "lib/windows"
+          New-Item -ItemType Directory -Force -Path $resWin | Out-Null
+
+          # A -ffreestanding builtins build has no libc, but int_util.c's <stdlib.h> include is
+          # guarded only by _WIN32 (always set for this target), so provide a 1-decl stub that
+          # satisfies the include (abort() is never actually called — __STDC_HOSTED__==0).
+          $stub = Join-Path (Get-Location) "rt-stub-inc"
+          New-Item -ItemType Directory -Force -Path $stub | Out-Null
+          $stubFwd = $stub -replace '\\','/'   # forward slashes for the -isystem flag in CMAKE_C_FLAGS
+          Set-Content -Path (Join-Path $stub "stdlib.h") -Encoding ascii -Value @(
+            '#ifndef _RXDK_RT_STUB_STDLIB_H',
+            '#define _RXDK_RT_STUB_STDLIB_H',
+            '#ifdef __cplusplus',
+            'extern "C" {',
+            '#endif',
+            '_Noreturn void abort(void);',
+            '#ifdef __cplusplus',
+            '}',
+            '#endif',
+            '#endif'
+          )
+
+          $bt = "build-builtins-i386"
+          if (Test-Path $bt) { Remove-Item $bt -Recurse -Force }
+          # Standalone compiler-rt builtins build, cross to the i686 windows-gnu target using the
+          # freshly built clang. CMAKE_SYSTEM_NAME=Windows puts CMake in cross mode (the Windows
+          # platform module needs an RC compiler -> llvm-rc); TRY_COMPILE as a static lib avoids
+          # needing a full link/sysroot for the compiler probe; BAREMETAL avoids libc deps.
+          & cmake -G Ninja -S "compiler-rt/lib/builtins" -B $bt `
+            "-DCMAKE_MAKE_PROGRAM=$ninja" `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_SYSTEM_NAME=Windows" `
+            "-DCMAKE_SYSTEM_PROCESSOR=x86" `
+            "-DCMAKE_C_COMPILER=$clang" `
+            "-DCMAKE_CXX_COMPILER=$clangxx" `
+            "-DCMAKE_ASM_COMPILER=$clang" `
+            "-DCMAKE_AR=$ar" `
+            "-DCMAKE_RANLIB=$ranlib" `
+            "-DCMAKE_NM=$nm" `
+            "-DCMAKE_RC_COMPILER=$rc" `
+            "-DCMAKE_C_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_CXX_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_ASM_COMPILER_TARGET=i686-pc-windows-gnu" `
+            "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" `
+            "-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON" `
+            "-DCOMPILER_RT_BAREMETAL_BUILD=ON" `
+            "-DCOMPILER_RT_INCLUDE_TESTS=OFF" `
+            "-DCMAKE_C_FLAGS=-march=pentium3 -ffreestanding -isystem $stubFwd" `
+            "-DCMAKE_ASM_FLAGS=-march=pentium3"
+          if ($LASTEXITCODE -ne 0) { throw "builtins configure failed" }
+          & cmake --build $bt
+          if ($LASTEXITCODE -ne 0) { throw "builtins build failed" }
+
+          # The archive is clang_rt.builtins-i386.lib (windows-gnu) or libclang_rt.builtins-i386.a.
+          $lib = Get-ChildItem $bt -Recurse -Include "clang_rt.builtins-*.lib","libclang_rt.builtins-*.a" |
+                 Select-Object -First 1
+          if ($null -eq $lib) { throw "builtins archive not produced" }
+          $dest = Join-Path $resWin "libclang_rt.builtins-i386.a"
+          Copy-Item $lib.FullName $dest -Force
+
+          # Swap the 6 SSE2 i386 asm int->float conversions for their generic .c compiled at x87.
+          $fp = @("floatdidf","floatdisf","floatdixf","floatundidf","floatundisf","floatundixf")
+          $swap = Join-Path (Get-Location) "rt-swap"
+          if (Test-Path $swap) { Remove-Item $swap -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $swap | Out-Null
+          foreach ($f in $fp) {
+            & $clang "--target=i686-pc-windows-gnu" "-march=pentium3" "-O2" "-ffreestanding" `
+              "-fno-stack-protector" "-c" "compiler-rt/lib/builtins/$f.c" "-o" (Join-Path $swap "$f.c.o")
+            if ($LASTEXITCODE -ne 0) { throw "recompile $f.c failed" }
+            # Drop the SSE2 asm object; the member suffix follows the target (.obj for windows),
+            # so try both. A no-op if absent -> the tripwire below still catches any SSE2 left in.
+            & $ar d $dest "$f.S.obj" 2>$null
+            & $ar d $dest "$f.S.o"   2>$null
+          }
+          & $ar r $dest (Get-ChildItem $swap -Filter *.c.o | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw "archive swap failed" }
+          Write-Host "builtins -> $dest ($((& $ar t $dest | Measure-Object).Count) members)"
+
+          # PIII tripwire: a pentium3 + x87 archive must be MMX+SSE1 at most. Fail loudly on any
+          # SSE2/AVX (the int + x87 conversion builtins use no XMM at all after the swap).
+          $asm = & $objdump -d $dest 2>&1 | Out-String
+          $bad = [regex]::Matches($asm,
+            '(?im)^\s*[0-9a-f]+:\s+.*?\b(v[a-z]+|movsd|movapd|movupd|movdqa|movdqu|punpck[lh]qdq|paddq|psubq|pmuludq|cvtsi2sd|cvtsd2ss|cvtss2sd|cvttsd2si|cvtsd2si|cvtpd2|cvtps2pd|cvtdq2pd|addsd|subsd|mulsd|divsd|sqrtsd|comisd|ucomisd|minsd|maxsd|andpd|orpd|xorpd|shufpd)\b')
+          if ($bad.Count -gt 0) {
+            Write-Host "ISA VIOLATION — SSE2+/AVX in builtins (first few):"
+            $bad | Select-Object -First 8 | ForEach-Object { Write-Host ("  " + $_.Value.Trim()) }
+            throw "compiler-rt builtins contain post-PIII instructions"
+          }
+          Write-Host "isa tripwire: clean (no SSE2+/AVX)"
+
+      # Make the shipped clang host-capable on Windows: fetch an llvm-mingw release
+      # (a cross toolchain carrying every target's sysroot) so the Package step can
+      # bundle a mingw sysroot. Then `clang --target=<arch>-w64-mingw32 --sysroot
+      # <pkg>/host-sysroot` builds native host tools with no MSVC. Linux/macOS need
+      # nothing (the system sysroot builds host tools).
+      - name: Fetch mingw host sysroot (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # gh authenticates via GH_TOKEN, avoiding the low unauthenticated GitHub
+          # API rate limit that shared runner IPs hit (the previous Invoke-RestMethod
+          # to /releases/latest failed with "API rate limit exceeded").
+          gh release download --repo mstorsjo/llvm-mingw `
+            --pattern '*ucrt-x86_64.zip' --output mingw.zip --clobber
+          Expand-Archive mingw.zip -DestinationPath mingw-extract -Force
+          $mroot = (Get-ChildItem mingw-extract -Directory | Select-Object -First 1).FullName
+          echo "MINGW_ROOT=$mroot" >> $env:GITHUB_ENV
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $root = "${{ matrix.name }}"
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          New-Item -ItemType Directory -Force -Path "$root/bin","$root/lib" | Out-Null
+          foreach ($n in @("clang","clang++","ld.lld","lld","llvm-ar","llvm-lib","llc")) {
+            $src = "build/bin/$n$exe"
+            if (Test-Path $src) { Copy-Item $src "$root/bin/" }
+          }
+          if (-not (Test-Path "$root/bin/clang$exe")) { throw "clang$exe missing" }
+          if (-not (Test-Path "$root/bin/ld.lld$exe")) { throw "ld.lld$exe missing" }
+          if (-not (Test-Path "$root/bin/llvm-ar$exe")) { throw "llvm-ar$exe missing" }
+          if (-not (Test-Path "$root/bin/llvm-lib$exe")) { throw "llvm-lib$exe missing" }
+          if (-not (Test-Path "$root/bin/clang++$exe") -and (Test-Path "$root/bin/clang$exe")) {
+            Copy-Item "$root/bin/clang$exe" "$root/bin/clang++$exe"
+          }
+          if (Test-Path "build/lib/clang") {
+            Copy-Item "build/lib/clang" "$root/lib/clang" -Recurse
+          }
+          # The i386 compiler-rt builtins archive must have ridden along inside lib/clang/<ver>/lib/windows.
+          $builtins = Get-ChildItem "$root/lib/clang" -Recurse -Filter "libclang_rt.builtins-i386.a" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $builtins) { throw "package missing libclang_rt.builtins-i386.a (builtins step did not stage it)" }
+          Write-Host "packaged builtins: $($builtins.FullName)"
+
+          $skip = @("test","tests","docs","examples","benchmarks","utils","cmake","Documentation")
+          function Copy-Needed([string]$src, [string]$dst) {
+            if (-not (Test-Path $src)) { throw "missing $src" }
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Get-ChildItem $src -Force | Where-Object { $skip -notcontains $_.Name } | ForEach-Object {
+              Copy-Item $_.FullName $dst -Recurse -Force
+            }
+          }
+          Copy-Needed "libcxx/include" "$root/libcxx/include"
+          Copy-Needed "libcxx/src" "$root/libcxx/src"
+          Copy-Needed "libcxxabi/include" "$root/libcxxabi/include"
+          Copy-Needed "libcxxabi/src" "$root/libcxxabi/src"
+          Copy-Needed "libunwind/include" "$root/libunwind/include"
+          Copy-Needed "libunwind/src" "$root/libunwind/src"
+          if (Test-Path "libc/include") { Copy-Needed "libc/include" "$root/libc/include" }
+          if (Test-Path "libc/shared") { Copy-Needed "libc/shared" "$root/libc/shared" }
+          if (Test-Path "libc/src/__support") { Copy-Needed "libc/src/__support" "$root/libc/src/__support" }
+          Copy-Needed "libc/hdr" "$root/libc/hdr"
+
+          foreach ($p in @(
+            "$root/lib/clang",
+            "$root/libcxx/include",
+            "$root/libcxx/src",
+            "$root/libcxxabi/include",
+            "$root/libcxxabi/src",
+            "$root/libunwind/include",
+            "$root/libunwind/src",
+            "$root/libc/hdr"
+          )) {
+            if (-not (Test-Path $p)) { throw "package missing $p" }
+          }
+
+          # Host sysroot (Windows only): assemble a trimmed mingw sysroot under
+          # $root/host-sysroot so the shipped clang can build native host tools.
+          # Keep only this package's host arch + the c++/mingw headers + the
+          # compiler-rt builtins; drop the other targets, sanitizers and fuzzer.
+          if ($IsWindows) {
+            $mroot = $env:MINGW_ROOT
+            if (-not $mroot -or -not (Test-Path $mroot)) { throw "MINGW_ROOT not set/found" }
+            $arch = if ($root -like '*arm64*') { 'aarch64' } else { 'x86_64' }
+            $triple = "$arch-w64-mingw32"
+            $sr = "$root/host-sysroot"
+            New-Item -ItemType Directory -Force -Path $sr | Out-Null
+            Copy-Item "$mroot/include" "$sr/include" -Recurse -Force
+            Copy-Item "$mroot/$triple" "$sr/$triple" -Recurse -Force
+            # The clang builtin HEADERS must come from THIS build's clang, not the mingw package's
+            # clang -- different clang snapshots skew (a newer header calls a builtin the shipped
+            # binary lacks and every host compile fails). Take the resource-dir include from
+            # build/lib/clang (matches the shipped clang); only the host-arch compiler-rt from mingw.
+            $ourRt = Get-ChildItem "build/lib/clang" -Directory | Select-Object -First 1
+            $rt = Get-ChildItem "$mroot/lib/clang" -Directory | Select-Object -First 1
+            $rtroot = "$sr/lib/clang/$($ourRt.Name)"
+            New-Item -ItemType Directory -Force -Path "$rtroot/lib/windows" | Out-Null
+            # Overriding -resource-dir to this bundle means it must carry BOTH the clang builtin
+            # headers (mm_malloc.h, stddef.h, ...) AND the host-arch compiler-rt builtins.
+            Copy-Item "$($ourRt.FullName)/include" "$rtroot/include" -Recurse -Force
+            Get-ChildItem "$($rt.FullName)/lib/windows/libclang_rt.builtins-*.a" |
+              Copy-Item -Destination "$rtroot/lib/windows" -Force
+            if (-not (Test-Path "$sr/include/stdio.h")) { throw "host-sysroot missing stdio.h" }
+            if (-not (Test-Path "$sr/$triple/lib/crt2.o")) { throw "host-sysroot missing crt2.o" }
+            if (-not (Test-Path "$rtroot/include/mm_malloc.h")) { throw "host-sysroot missing builtin headers" }
+            Write-Host "host-sysroot bundled ($triple)"
+          }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path $root -DestinationPath "dist/$root.zip" -Force
+          Get-Item "dist/$root.zip" | Format-List Name, Length
+
+      - name: Smoke-test clang
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          $clang = "${{ matrix.name }}/bin/clang$exe"
+          $out = & $clang --version 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "clang") { throw "unexpected clang --version" }
+
+          # Both consoles' targets must be registered in the one binary.
+          $targets = & $clang --print-targets 2>&1 | Out-String
+          foreach ($t in @("powerpc","x86")) {
+            if ($targets -notmatch $t) { throw "clang is missing the '$t' target" }
+          }
+          Write-Host "targets present: powerpc + x86"
+
+          # Host-compile check: the packaged clang must build a native host exe.
+          # Windows goes through the bundled mingw sysroot; Unix uses the system one.
+          '#include <stdio.h>' | Out-File -Encoding ascii hosttest.c
+          '#include <stdlib.h>' | Add-Content hosttest.c
+          'int main(void){void*p=malloc(8);free(p);puts("rxdk host clang ok");return p?0:1;}' | Add-Content hosttest.c
+          if ($IsWindows) {
+            $arch = if ('${{ matrix.name }}' -like '*arm64*') { 'aarch64' } else { 'x86_64' }
+            $sr = (Resolve-Path "${{ matrix.name }}/host-sysroot").Path
+            $rd = (Get-ChildItem "$sr/lib/clang" -Directory | Select-Object -First 1).FullName
+            & $clang --target="$arch-w64-mingw32" -fuse-ld=lld --sysroot="$sr" `
+              "-resource-dir=$rd" --rtlib=compiler-rt --unwindlib=libunwind `
+              hosttest.c -o hosttest$exe
+          } elseif ($IsMacOS) {
+            $macarch = if ('${{ matrix.name }}' -like '*arm64*') { 'arm64' } else { 'x86_64' }
+            $sdk = (& xcrun --show-sdk-path).Trim()
+            & $clang --target="$macarch-apple-darwin" -isysroot $sdk hosttest.c -o hosttest$exe
+          } else {
+            $arch = if ('${{ matrix.name }}' -like '*arm64*') { 'aarch64' } else { 'x86_64' }
+            & $clang --target="$arch-unknown-linux-gnu" hosttest.c -o hosttest$exe
+          }
+          if ($LASTEXITCODE -ne 0) { throw "host compile failed" }
+          if (-not (Test-Path "hosttest$exe")) { throw "no host exe produced" }
+          Write-Host "host exe built OK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [build]
+    if: >
+      always() &&
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' || github.ref_name == 'xbox')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Determine release tag
+        id: meta
+        shell: bash
+        run: |
+          ls -la dist || true
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+          else
+            tag="latest"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          shopt -s nullglob
+          zips=(dist/xbox-*.zip)
+          if [[ ${#zips[@]} -eq 0 ]]; then
+            echo "no host zips produced" >&2
+            exit 1
+          fi
+          # Build-stamp marker asset (read as the toolchain "version"; restamped every build so
+          # consumers' update detection fires without a manual bump).
+          date -u '+%Y-%m-%d %H:%M' > dist/xbox_version
+          echo "wrote xbox_version = $(cat dist/xbox_version)"
+
+      # The release is NOT deleted first: uploading replaces same-named assets only. The legacy
+      # per-console xboxog-*/xbox360-* assets (if still present) are left untouched until consumers
+      # finish migrating to the unified xbox-*.zip.
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Team Resurgent clang ${{ steps.meta.outputs.tag }}
+          make_latest: true
+          body: |
+            Rolling clang/lld builds for Team Resurgent's Xbox targets.
+
+            - `xbox-<os>-<arch>.zip` - unified toolchain, one clang targeting both
+              the original Xbox (`i686-pc-windows-gnu`) and Xbox 360
+              (`powerpc-unknown-xbox360`), from branch `xbox`. Version:
+              `xbox_version` (build timestamp).
+
+            Legacy per-console `xboxog-*`/`xbox360-*` zips (if present) remain until
+            consumers migrate to the unified package.
+          files: |
+            dist/xbox-*.zip
+            dist/xbox_version
