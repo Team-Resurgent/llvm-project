@@ -547,9 +547,12 @@ inline bool LocalAddressSpace::findUnwindSections(
   // still gives the correct start). The PE header is little-endian while the CPU
   // is big-endian, so every multi-byte field is assembled from bytes by hand.
   {
+    // Lower bound = the OG-Xbox XBE image base (0x10000); the 360 XEX base
+    // (0x82000000) is higher, so this bound is safe for both (the downward scan
+    // finds the image header first regardless).
     const unsigned char *pe = 0;
     for (uintptr_t a = info.dwarf_section & ~(uintptr_t)0xFFF;
-         a >= 0x82000000; a -= 0x1000) {
+         a >= 0x10000; a -= 0x1000) {
       const unsigned char *p = (const unsigned char *)a;
       if (p[0] == 'M' && p[1] == 'Z') {
         uint32_t peoff = (uint32_t)p[0x3C] | ((uint32_t)p[0x3D] << 8) |

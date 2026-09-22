@@ -75,7 +75,11 @@
 #  define _LIBCXXABI_NO_EXCEPTIONS
 #endif
 
-#if defined(_WIN32)
+// RXDK-Libs builds -U_WIN32 (Itanium/POSIX paths) but clang still emits i386
+// member-function destructors as __thiscall. _LIBCXXABI_FORCE_THISCALL_DTOR keeps
+// the exception destructor pointer's convention __thiscall to match, and in sync
+// with libc++'s exception_ptr.h __cxa_init_primary_exception declaration.
+#if defined(_WIN32) || defined(_LIBCXXABI_FORCE_THISCALL_DTOR)
 #define _LIBCXXABI_DTOR_FUNC __thiscall
 #else
 #define _LIBCXXABI_DTOR_FUNC
