@@ -485,6 +485,10 @@ jobs:
             echo "no host zips produced" >&2
             exit 1
           fi
+          # Per-target build stamp marker asset (the RXDK engine reads this as the toolchain
+          # "version" -- it restamps every build, so update detection fires without a manual bump).
+          date -u '+%Y-%m-%d %H:%M' > dist/xboxog_version
+          echo "wrote xboxog_version = $(cat dist/xboxog_version)"
 
       # The release is NOT deleted first: the Xbox 360 pipeline shares it.
       # Uploading replaces same-named assets only, so xbox360-*.zip survives.
@@ -502,4 +506,6 @@ jobs:
             - `xboxog-<os>-<arch>.zip` - original Xbox, target `i686-pc-windows-gnu` (branch `xboxog`)
 
             Each pipeline replaces only its own zips, so both sets live here.
-          files: dist/xboxog-*.zip
+          files: |
+            dist/xboxog-*.zip
+            dist/xboxog_version
