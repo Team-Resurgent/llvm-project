@@ -3801,27 +3801,11 @@ SDValue PPCTargetLowering::LowerVAARG(SDValue Op, SelectionDAG &DAG) const {
                               MachinePointerInfo(SV), MVT::i8);
 
   // determine if we should load from reg_save_area or overflow_area
-  //
-  // The Xbox 360 ABI (CC_PPC32_Xbox360) passes stack arguments in 8-byte slots,
-  // big-endian right-justified, so a value narrower than 8 bytes sits in the low
-  // word of its slot. The reg_save_area is still 4-byte packed, so OurReg above
-  // is unchanged; only the overflow area needs the in-slot offset and an 8-byte
-  // (rather than 4-byte) stride.
-  SDValue OverflowRead = OverflowArea;
-  unsigned OverflowStep = VT.isInteger() ? 4 : 8;
-  if (Subtarget.isXbox360ABI()) {
-    OverflowStep = 8;
-    unsigned Size = VT.getStoreSize();
-    if (!Subtarget.isLittleEndian() && Size < 8)
-      OverflowRead = DAG.getNode(ISD::ADD, dl, PtrVT, OverflowArea,
-                                 DAG.getConstant(8 - Size, dl, PtrVT));
-  }
+  SDValue Result = DAG.getNode(ISD::SELECT, dl, PtrVT, CC, OurReg, OverflowArea);
 
-  SDValue Result = DAG.getNode(ISD::SELECT, dl, PtrVT, CC, OurReg, OverflowRead);
-
-  // increase overflow_area by one slot if gpr/fpr > 8
+  // increase overflow_area by 4/8 if gpr/fpr > 8
   SDValue OverflowAreaPlusN = DAG.getNode(ISD::ADD, dl, PtrVT, OverflowArea,
-                                          DAG.getConstant(OverflowStep,
+                                          DAG.getConstant(VT.isInteger() ? 4 : 8,
                                           dl, MVT::i32));
 
   OverflowArea = DAG.getNode(ISD::SELECT, dl, MVT::i32, CC, OverflowArea,
@@ -4399,18 +4383,8 @@ SDValue PPCTargetLowering::LowerFormalArguments_32SVR4(
     int Depth = NumGPArgRegs * PtrVT.getSizeInBits()/8 +
                 NumFPArgRegs * MVT(MVT::f64).getSizeInBits()/8;
 
-    // First overflow (stack) argument offset. Under CC_PPC32_Xbox360 every
-    // argument -- including the ones passed in registers -- reserves an 8-byte
-    // slot, so the first stack vararg sits after all NumGPArgRegs GPR slots, not
-    // merely after the named args that getStackSize() counted. Without this the
-    // overflow pointer aims into the empty reserved GPR slots and va_arg reads
-    // garbage once it runs out of registers.
-    unsigned VarArgsStackOffset = CCInfo.getStackSize();
-    if (Subtarget.isXbox360ABI())
-      VarArgsStackOffset =
-          std::max<unsigned>(VarArgsStackOffset, LinkageSize + NumGPArgRegs * 8);
     FuncInfo->setVarArgsStackOffset(MFI.CreateFixedObject(
-        PtrVT.getSizeInBits() / 8, VarArgsStackOffset, true));
+        PtrVT.getSizeInBits() / 8, CCInfo.getStackSize(), true));
 
     FuncInfo->setVarArgsFrameIndex(
         MFI.CreateStackObject(Depth, Align(8), false));
