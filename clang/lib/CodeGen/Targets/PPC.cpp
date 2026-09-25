@@ -566,7 +566,11 @@ RValue PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
     Builder.CreateStore(Builder.getInt8(OverflowLimit), NumRegsAddr);
 
     // Everything in the overflow area is rounded up to a size of at least 4.
-    CharUnits OverflowAreaAlign = CharUnits::fromQuantity(4);
+    // The Xbox 360 ABI passes stack arguments in 8-byte slots (like PPC64),
+    // not the 4-byte slots of standard 32-bit SVR4, so a narrow argument still
+    // occupies -- and the overflow pointer advances by -- a full 8 bytes.
+    bool IsXbox360 = getTarget().getTriple().getOS() == llvm::Triple::Xbox360;
+    CharUnits OverflowAreaAlign = CharUnits::fromQuantity(IsXbox360 ? 8 : 4);
 
     CharUnits Size;
     if (!isIndirect) {
@@ -588,9 +592,17 @@ RValue PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
                              OverflowArea.getElementType(), Align);
     }
 
-    MemAddr = OverflowArea.withElementType(DirectTy);
+    // On Xbox 360 a value narrower than its 8-byte slot is right-justified
+    // (the target is big-endian), so it begins Size - Width bytes into the slot.
+    Address ArgAddr = OverflowArea;
+    if (IsXbox360 && !isIndirect) {
+      CharUnits Width = CGF.getContext().getTypeSizeInChars(Ty);
+      if (Width < Size)
+        ArgAddr = Builder.CreateConstInBoundsByteGEP(OverflowArea, Size - Width);
+    }
+    MemAddr = ArgAddr.withElementType(DirectTy);
 
-    // Increase the overflow area.
+    // Increase the overflow area by the full slot.
     OverflowArea = Builder.CreateConstInBoundsByteGEP(OverflowArea, Size);
     Builder.CreateStore(OverflowArea.emitRawPointer(CGF), OverflowAreaAddr);
     CGF.EmitBranch(Cont);
