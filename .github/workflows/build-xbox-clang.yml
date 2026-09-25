@@ -62,11 +62,35 @@ jobs:
             os: macos-15
     steps:
       - name: Checkout (compiler cone)
+        id: cone
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           # teamresurgent is a thin CI-only branch (no llvm/ source); when run via
           # workflow_dispatch from the default branch, pin the checkout to the xbox
           # source branch so there is something to build.
+          ref: xbox
+          fetch-depth: 1
+          sparse-checkout-cone-mode: true
+          sparse-checkout: |
+            llvm
+            clang
+            lld
+            cmake
+            compiler-rt
+            third-party
+            libc
+            libunwind
+            libcxx
+            libcxxabi
+
+      # actions/checkout has no built-in retry, and the sparse partial clone
+      # occasionally 408s lazily fetching a blob from the promisor remote, which
+      # sinks the whole matrix job (and thus the release). Retry once on failure.
+      - name: Checkout (compiler cone, retry)
+        if: steps.cone.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
           ref: xbox
           fetch-depth: 1
           sparse-checkout-cone-mode: true
