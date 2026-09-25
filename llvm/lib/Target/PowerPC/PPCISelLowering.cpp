@@ -4383,8 +4383,18 @@ SDValue PPCTargetLowering::LowerFormalArguments_32SVR4(
     int Depth = NumGPArgRegs * PtrVT.getSizeInBits()/8 +
                 NumFPArgRegs * MVT(MVT::f64).getSizeInBits()/8;
 
+    // First overflow (stack) argument offset. Under CC_PPC32_Xbox360 every
+    // argument -- including the ones passed in registers -- reserves an 8-byte
+    // slot, so the first stack vararg sits after all NumGPArgRegs GPR slots, not
+    // merely after the named args that getStackSize() counted. Without this the
+    // overflow pointer aims into the empty reserved GPR slots and va_arg reads
+    // garbage once it runs out of registers.
+    unsigned VarArgsStackOffset = CCInfo.getStackSize();
+    if (Subtarget.isXbox360ABI())
+      VarArgsStackOffset =
+          std::max<unsigned>(VarArgsStackOffset, LinkageSize + NumGPArgRegs * 8);
     FuncInfo->setVarArgsStackOffset(MFI.CreateFixedObject(
-        PtrVT.getSizeInBits() / 8, CCInfo.getStackSize(), true));
+        PtrVT.getSizeInBits() / 8, VarArgsStackOffset, true));
 
     FuncInfo->setVarArgsFrameIndex(
         MFI.CreateStackObject(Depth, Align(8), false));
