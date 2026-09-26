@@ -149,6 +149,7 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : Triple(T) {
   ProcessIDType = SignedInt;
   UseSignedCharForObjCBool = true;
   UseBitFieldTypeAlignment = true;
+  LSBFirstBitfields = false;
   UseZeroLengthBitfieldAlignment = false;
   UseLeadingZeroLengthBitfield = true;
   UseExplicitBitFieldAlignment = true;
