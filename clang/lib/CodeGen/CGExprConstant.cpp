@@ -195,6 +195,13 @@ bool ConstantAggregateBuilder::addBits(llvm::APInt Bits, uint64_t OffsetInBits,
   const ASTContext &Context = CGM.getContext();
   const uint64_t CharWidth = CGM.getContext().getCharWidth();
 
+  // Bit-fields are laid out most-significant-bit first on big-endian targets,
+  // except when the target allocates them least-significant-bit first even
+  // when big-endian (the MS Xbox 360 convention), in which case they are
+  // placed like little-endian.
+  const bool BitfieldBE = CGM.getDataLayout().isBigEndian() &&
+                          !Context.getTargetInfo().useLSBFirstBitfields();
+
   // Offset of where we want the first bit to go within the bits of the
   // current char.
   unsigned OffsetWithinChar = OffsetInBits % CharWidth;
@@ -213,7 +220,7 @@ bool ConstantAggregateBuilder::addBits(llvm::APInt Bits, uint64_t OffsetInBits,
     llvm::APInt BitsThisChar = Bits;
     if (BitsThisChar.getBitWidth() < CharWidth)
       BitsThisChar = BitsThisChar.zext(CharWidth);
-    if (CGM.getDataLayout().isBigEndian()) {
+    if (BitfieldBE) {
       // Figure out how much to shift by. We may need to left-shift if we have
       // less than one byte of Bits left.
       int Shift = Bits.getBitWidth() - CharWidth + OffsetWithinChar;
@@ -247,7 +254,7 @@ bool ConstantAggregateBuilder::addBits(llvm::APInt Bits, uint64_t OffsetInBits,
 
       // Figure out which bits we want and discard the rest.
       llvm::APInt UpdateMask(CharWidth, 0);
-      if (CGM.getDataLayout().isBigEndian())
+      if (BitfieldBE)
         UpdateMask.setBits(CharWidth - OffsetWithinChar - WantedBits,
                            CharWidth - OffsetWithinChar);
       else
@@ -282,7 +289,7 @@ bool ConstantAggregateBuilder::addBits(llvm::APInt Bits, uint64_t OffsetInBits,
       break;
 
     // Remove the consumed bits from Bits.
-    if (!CGM.getDataLayout().isBigEndian())
+    if (!BitfieldBE)
       Bits.lshrInPlace(WantedBits);
     Bits = Bits.trunc(Bits.getBitWidth() - WantedBits);
 

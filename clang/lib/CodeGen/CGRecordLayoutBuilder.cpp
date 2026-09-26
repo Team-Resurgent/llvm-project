@@ -247,7 +247,10 @@ void CGRecordLowering::setBitFieldInfo(
   // a bitfield as a single large integer load, we can imagine the bits
   // counting from the most-significant-bit instead of the
   // least-significant-bit.
-  if (DataLayout.isBigEndian())
+  // Targets that allocate bit-fields least-significant-bit first even when
+  // big-endian (the MS Xbox 360 convention) keep the LSB-first offset.
+  if (DataLayout.isBigEndian() &&
+      !Context.getTargetInfo().useLSBFirstBitfields())
     Info.Offset = Info.StorageSize - (Info.Offset + Info.Size);
 
   Info.VolatileStorageSize = 0;
@@ -1068,7 +1071,10 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
   // a bitfield as a single large integer load, we can imagine the bits
   // counting from the most-significant-bit instead of the
   // least-significant-bit.
-  if (Types.getDataLayout().isBigEndian()) {
+  // Targets that allocate bit-fields least-significant-bit first even when
+  // big-endian (the MS Xbox 360 convention) keep the LSB-first offset.
+  if (Types.getDataLayout().isBigEndian() &&
+      !Types.getContext().getTargetInfo().useLSBFirstBitfields()) {
     Offset = StorageSize - (Offset + Size);
   }
 
@@ -1181,7 +1187,10 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
       // is in-bounds. However, on BE systems, the offset may be non-zero, but
       // the size + offset should match the storage size in that case as it
       // "starts" at the back.
-      if (getDataLayout().isBigEndian())
+      // Targets that keep bit-fields least-significant-bit first even when
+      // big-endian (the MS Xbox 360 convention) start at the front like LE.
+      if (getDataLayout().isBigEndian() &&
+          !getContext().getTargetInfo().useLSBFirstBitfields())
         assert(static_cast<unsigned>(Info.Offset + Info.Size) ==
                Info.StorageSize &&
                "Big endian union bitfield does not end at the back");

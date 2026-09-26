@@ -177,6 +177,14 @@ protected:
   LLVM_PREFERRED_TYPE(bool)
   unsigned UseBitFieldTypeAlignment : 1;
 
+  /// Whether bit-fields are allocated starting from the least-significant bit
+  /// of their storage unit even on big-endian targets. The Microsoft Xbox 360
+  /// (Xenon) compiler does this, so structs shared with MS-compiled libraries
+  /// and GPU hardware registers must match. (Default: false -- big-endian
+  /// targets allocate bit-fields most-significant-bit first.)
+  LLVM_PREFERRED_TYPE(bool)
+  unsigned LSBFirstBitfields : 1;
+
   /// Whether zero length bitfields (e.g., int : 0;) force alignment of
   /// the next bitfield.
   ///
@@ -943,6 +951,12 @@ public:
   /// when laying out structures.
   bool useBitFieldTypeAlignment() const {
     return UseBitFieldTypeAlignment;
+  }
+
+  /// Check whether bit-fields are allocated least-significant-bit first even on
+  /// big-endian targets (the Microsoft/Xbox 360 convention).
+  bool useLSBFirstBitfields() const {
+    return LSBFirstBitfields;
   }
 
   /// Check whether zero length bitfields should force alignment of
