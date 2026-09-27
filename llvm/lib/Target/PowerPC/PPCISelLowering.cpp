@@ -19823,6 +19823,13 @@ Sched::Preference PPCTargetLowering::getSchedulingPreference(SDNode *N) const {
 FastISel *PPCTargetLowering::createFastISel(
     FunctionLoweringInfo &FuncInfo, const TargetLibraryInfo *LibInfo,
     const LibcallLoweringInfo *LibcallLowering) const {
+  // PPCFastISel assumes ppc64 pointers are i64 (it asserts "Non-address!" on an
+  // i32 address). The Xbox 360 target is ILP32-on-ppc64 (i32 pointers), so
+  // FastISel would miscompile/crash at -O0. Fall back to SelectionDAG isel,
+  // which handles the 32-bit-pointer address modes correctly. Only affects
+  // -O0 compile speed, not correctness -- Debug titles still build.
+  if (Subtarget.isXbox360ABI())
+    return nullptr;
   return PPC::createFastISel(FuncInfo, LibInfo, LibcallLowering);
 }
 
