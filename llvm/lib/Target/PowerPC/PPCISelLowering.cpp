@@ -2964,6 +2964,18 @@ bool PPCTargetLowering::getPreIndexedAddressParts(SDNode *N, SDValue &Base,
                                                   SelectionDAG &DAG) const {
   if (DisablePPCPreinc) return false;
 
+  // The Xbox 360 (Xenon) target is ILP32-on-ppc64: 32-bit pointers held in
+  // 64-bit registers. The pre-increment update forms (LWZU/STWU/LDU/STDU, and
+  // their indexed variants) are matched with a 64-bit (G8RC) base register, but
+  // our base pointers are naturally i32 (GPRC). Rather than teach every pre-inc
+  // pattern to widen an i32 base, disable pre-increment addressing for this
+  // target: the pointer update is then materialized as an ordinary add, which
+  // the regular addressing-mode selection already widens correctly. This is a
+  // lost fusion optimization only, not a correctness issue -- revisit later to
+  // re-enable stwu/lwzu fusion for ILP32-on-ppc64.
+  if (Subtarget.isXbox360ABI())
+    return false;
+
   bool isLoad = true;
   SDValue Ptr;
   EVT VT;
