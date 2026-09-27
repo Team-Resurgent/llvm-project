@@ -2581,6 +2581,35 @@ bool llvm::isIntS34Immediate(SDValue Op, int64_t &Imm) {
   return isIntS34Immediate(Op.getNode(), Imm);
 }
 
+/// On the ILP32-on-ppc64 Xbox 360 target a pointer is a 32-bit value living in a
+/// GPRC register, but the 64-bit addressing modes require a 64-bit G8RC base.
+/// A plain COPY from GPRC to G8RC is ill-formed (different sizes) and crashes in
+/// post-RA expansion, so zero-extend the 32-bit pointer into a G8RC: splice it
+/// into the low half of a fresh i64 and clear the high 32 bits (rldicl 0,32) --
+/// correct even when the pointer came from 32-bit arithmetic that left garbage
+/// in the register's high half. Only applied when the base is a 32-bit register
+/// value on a 64-bit target (i.e. ILP32-on-ppc64); a normal ppc64 base is
+/// already i64 and a ppc32 target is not 64-bit, so both are untouched.
+static SDValue zeroExtendPtrToGPR64(const PPCSubtarget &Subtarget,
+                                    SelectionDAG &DAG, SDValue Base) {
+  if (!Subtarget.isPPC64() || !Base.getNode() ||
+      Base.getValueType() != MVT::i32 ||
+      Base.getOpcode() == ISD::TargetConstant ||
+      Base.getOpcode() == ISD::TargetFrameIndex)
+    return Base;
+  SDLoc dl(Base);
+  SDValue ImpDef(
+      DAG.getMachineNode(TargetOpcode::IMPLICIT_DEF, dl, MVT::i64), 0);
+  SDValue Sub32 = DAG.getTargetConstant(PPC::sub_32, dl, MVT::i32);
+  SDValue Wide(DAG.getMachineNode(TargetOpcode::INSERT_SUBREG, dl, MVT::i64,
+                                  ImpDef, Base, Sub32),
+               0);
+  SDValue SH = DAG.getTargetConstant(0, dl, MVT::i32);
+  SDValue MB = DAG.getTargetConstant(32, dl, MVT::i32);
+  return SDValue(
+      DAG.getMachineNode(PPC::RLDICL, dl, MVT::i64, Wide, SH, MB), 0);
+}
+
 /// SelectAddressRegReg - Given the specified addressed, check to see if it
 /// can be represented as an indexed [r+r] operation.  Returns false if it
 /// can be more efficiently represented as [r+imm]. If \p EncodingAlignment is
@@ -2777,7 +2806,7 @@ bool PPCTargetLowering::SelectAddressRegImm(
     Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
     fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
   } else
-    Base = N;
+    Base = zeroExtendPtrToGPR64(Subtarget, DAG, N);
   return true;      // [r+0]
 }
 
@@ -3568,7 +3597,11 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
 
   // 64-bit SVR4 ABI & AIX ABI code is always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  // The Xbox 360 ILP32-on-ppc64 ABI has NO TOC (32-bit absolute addresses
+  // materialized directly), so it must not take the TOC path -- fall through to
+  // the direct LIS/ORI Hi/Lo materialization below.
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {
     if (Subtarget.isUsingPCRelativeCalls()) {
       EVT Ty = getPointerTy(DAG.getDataLayout());
       if (isAccessedAsGotIndirect(Op)) {
@@ -6460,7 +6493,12 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
 
       PtrOff = DAG.getConstant(ArgOffset, dl, StackPtr.getValueType());
 
-      PtrOff = DAG.getNode(ISD::ADD, dl, PtrVT, StackPtr, PtrOff);
+      // Stack-address arithmetic is done in the stack pointer's register width
+      // (X1 is 64-bit). On the ILP32-on-ppc64 target PtrVT is i32, so using it
+      // here would build an i32-result ADD over i64 operands; use StackPtr's
+      // type so caller/callee stack slots are computed as 64-bit addresses.
+      PtrOff = DAG.getNode(ISD::ADD, dl, StackPtr.getValueType(), StackPtr,
+                           PtrOff);
     };
 
     if (!IsFastCall) {
@@ -20908,7 +20946,8 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
         if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Op0)) {
           Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
           fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
-        }
+        } else
+          Base = zeroExtendPtrToGPR64(Subtarget, DAG, Op0);
         break;
       }
     }
@@ -20920,7 +20959,7 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
              Disp.getOpcode() == ISD::TargetGlobalTLSAddress ||
              Disp.getOpcode() == ISD::TargetConstantPool ||
              Disp.getOpcode() == ISD::TargetJumpTable);
-      Base = N.getOperand(0);
+      Base = zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(0));
       break;
     }
     // This is a constant address at most 32 bits. The base will be
@@ -20958,7 +20997,7 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
       Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
       fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
     } else
-      Base = N;
+      Base = zeroExtendPtrToGPR64(Subtarget, DAG, N);
     break;
   }
   case PPC::AM_PrefixDForm: {
@@ -20990,10 +21029,10 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
   default: { // By default, X-Form is always available to be selected.
     // When a frame index is not aligned, we also match by XForm.
     FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(N);
-    Base = FI ? N : N.getOperand(1);
+    Base = FI ? N : zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(1));
     Disp = FI ? DAG.getRegister(Subtarget.isPPC64() ? PPC::ZERO8 : PPC::ZERO,
                                 N.getValueType())
-              : N.getOperand(0);
+              : zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(0));
     break;
   }
   }
