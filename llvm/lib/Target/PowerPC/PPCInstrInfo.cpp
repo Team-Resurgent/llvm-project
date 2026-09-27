@@ -1773,6 +1773,32 @@ void PPCInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     return;
   }
 
+  // A copy that crosses between the 32-bit GPRC and 64-bit G8RC classes (as the
+  // ILP32-on-ppc64 Xbox 360 target produces when a 32-bit value is used where a
+  // 64-bit register is required, e.g. an address or a legalized i32->i64) moves
+  // the value through the GPRC operand's 64-bit super-register with a 64-bit OR8.
+  {
+    const TargetRegisterInfo &TRI = getRegisterInfo();
+    if (PPC::G8RCRegClass.contains(DestReg) &&
+        PPC::GPRCRegClass.contains(SrcReg)) {
+      MCRegister SrcX =
+          TRI.getMatchingSuperReg(SrcReg, PPC::sub_32, &PPC::G8RCRegClass);
+      BuildMI(MBB, I, DL, get(PPC::OR8), DestReg)
+          .addReg(SrcX)
+          .addReg(SrcX, getKillRegState(KillSrc));
+      return;
+    }
+    if (PPC::GPRCRegClass.contains(DestReg) &&
+        PPC::G8RCRegClass.contains(SrcReg)) {
+      MCRegister DestX =
+          TRI.getMatchingSuperReg(DestReg, PPC::sub_32, &PPC::G8RCRegClass);
+      BuildMI(MBB, I, DL, get(PPC::OR8), DestX)
+          .addReg(SrcReg)
+          .addReg(SrcReg, getKillRegState(KillSrc));
+      return;
+    }
+  }
+
   unsigned Opc;
   if (PPC::GPRCRegClass.contains(DestReg, SrcReg))
     Opc = PPC::OR;
