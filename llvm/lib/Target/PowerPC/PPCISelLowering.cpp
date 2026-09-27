@@ -3108,7 +3108,8 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     if (Subtarget.isUsingPCRelativeCalls()) {
       SDLoc DL(CP);
       EVT Ty = getPointerTy(DAG.getDataLayout());
@@ -3203,7 +3204,8 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetJumpTable(JT->getIndex(), PtrVT);
     return getTOCEntry(DAG, SDLoc(JT), GA);
@@ -3242,7 +3244,8 @@ SDValue PPCTargetLowering::LowerBlockAddress(SDValue Op,
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual BlockAddress is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetBlockAddress(BA, PtrVT, BASDN->getOffset());
     return getTOCEntry(DAG, SDLoc(BASDN), GA);
@@ -5446,8 +5449,11 @@ static bool isIndirectCall(const SDValue &Callee, SelectionDAG &DAG,
 
 // AIX and 64-bit ELF ABIs w/o PCRel require a TOC save/restore around calls.
 static inline bool isTOCSaveRestoreRequired(const PPCSubtarget &Subtarget) {
+  // The Xbox 360 ELFv2 target has no TOC, so an indirect call neither saves nor
+  // restores one (and must not emit the TOC-restore address arithmetic).
   return Subtarget.isAIXABI() ||
-         (Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls());
+         (Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls() &&
+          !Subtarget.isXbox360ABI());
 }
 
 static unsigned getCallOpcode(PPCTargetLowering::CallFlags CFlags,
@@ -5552,6 +5558,12 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
     return DAG.getMCSymbol(S, PtrVT);
   };
 
+  // A direct call's callee is a link-time relocation, so its nominal type is
+  // immaterial to the emitted `bl`. On the ILP32-on-ppc64 Xbox 360 target the
+  // pointer type is i32, but the ppc64 CALL patterns match a 64-bit callee, so
+  // materialize the callee symbol as i64 to select cleanly.
+  EVT CalleeVT = Subtarget.isXbox360ABI() ? MVT::i64 : Callee.getValueType();
+
   auto *G = dyn_cast<GlobalAddressSDNode>(Callee);
   const GlobalValue *GV = G ? G->getGlobal() : nullptr;
   if (isFunctionGlobalAddress(GV)) {
@@ -5560,7 +5572,7 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
     if (Subtarget.isAIXABI()) {
       return getAIXFuncEntryPointSymbolSDNode(GV);
     }
-    return DAG.getTargetGlobalAddress(GV, dl, Callee.getValueType(), 0,
+    return DAG.getTargetGlobalAddress(GV, dl, CalleeVT, 0,
                                       UsePlt ? PPCII::MO_PLT : 0);
   }
 
@@ -5588,7 +5600,7 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
 
       SymName = getExternalFunctionEntryPointSymbol(SymName)->getName().data();
     }
-    return DAG.getTargetExternalSymbol(SymName, Callee.getValueType(),
+    return DAG.getTargetExternalSymbol(SymName, CalleeVT,
                                        UsePlt ? PPCII::MO_PLT : 0);
   }
 
@@ -5616,6 +5628,11 @@ static SDValue getOutputChainFromCallSeq(SDValue CallSeqStart) {
 static void prepareIndirectCall(SelectionDAG &DAG, SDValue &Callee,
                                 SDValue &Glue, SDValue &Chain,
                                 const SDLoc &dl) {
+  // On the ILP32-on-ppc64 Xbox 360 target a function pointer is a 32-bit value,
+  // but the count register (CTR8) is 64-bit; zero-extend it so MTCTR/bctr get a
+  // full 64-bit callee address.
+  if (Callee.getValueType() == MVT::i32)
+    Callee = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i64, Callee);
   SDValue MTCTROps[] = {Chain, Callee, Glue};
   EVT ReturnTypes[] = {MVT::Other, MVT::Glue};
   Chain = DAG.getNode(PPCISD::MTCTR, dl, ReturnTypes,
