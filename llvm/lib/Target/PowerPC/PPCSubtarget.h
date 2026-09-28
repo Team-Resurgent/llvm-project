@@ -256,8 +256,10 @@ public:
   /// True if the ABI is descriptor based.
   bool usesFunctionDescriptors() const {
     // Both 32-bit and 64-bit AIX are descriptor based. For ELF only the 64-bit
-    // v1 ABI uses descriptors.
-    return isAIXABI() || (is64BitELFABI() && !isELFv2ABI());
+    // v1 ABI uses descriptors. The Xbox 360 ELFv2 target is direct-entry (no
+    // function descriptors), so it never uses them regardless of other flags.
+    return (isAIXABI() || (is64BitELFABI() && !isELFv2ABI())) &&
+           !isXbox360ABI();
   }
 
   unsigned descriptorTOCAnchorOffset() const {

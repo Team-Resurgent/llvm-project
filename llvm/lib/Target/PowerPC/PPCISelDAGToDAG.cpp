@@ -7353,6 +7353,16 @@ void PPCDAGToDAGISel::PeepholePPC64ZExt() {
   if (!Subtarget->isPPC64())
     return;
 
+  // On the ILP32-on-ppc64 Xbox 360 target the i32->i64 zero-extend pattern
+  // (RLDICL(INSERT_SUBREG ...)) is emitted deliberately to widen 32-bit
+  // pointers into 64-bit address registers (see zeroExtendPtrToGPR64). Promoting
+  // the feeding 32-bit ops to 64-bit here is unsafe for that use (the source can
+  // be a TargetGlobalAddress-bearing LIS/LI), so leave the zero-extend in place.
+  // TODO: re-enable selectively once the promotion handles the ILP32 pointer
+  // materialization forms.
+  if (Subtarget->isXbox360ABI())
+    return;
+
   // When we zero-extend from i32 to i64, we use a pattern like this:
   // def : Pat<(i64 (zext i32:$in)),
   //           (RLDICL (INSERT_SUBREG (i64 (IMPLICIT_DEF)), $in, sub_32),

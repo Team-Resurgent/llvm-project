@@ -2581,6 +2581,35 @@ bool llvm::isIntS34Immediate(SDValue Op, int64_t &Imm) {
   return isIntS34Immediate(Op.getNode(), Imm);
 }
 
+/// On the ILP32-on-ppc64 Xbox 360 target a pointer is a 32-bit value living in a
+/// GPRC register, but the 64-bit addressing modes require a 64-bit G8RC base.
+/// A plain COPY from GPRC to G8RC is ill-formed (different sizes) and crashes in
+/// post-RA expansion, so zero-extend the 32-bit pointer into a G8RC: splice it
+/// into the low half of a fresh i64 and clear the high 32 bits (rldicl 0,32) --
+/// correct even when the pointer came from 32-bit arithmetic that left garbage
+/// in the register's high half. Only applied when the base is a 32-bit register
+/// value on a 64-bit target (i.e. ILP32-on-ppc64); a normal ppc64 base is
+/// already i64 and a ppc32 target is not 64-bit, so both are untouched.
+static SDValue zeroExtendPtrToGPR64(const PPCSubtarget &Subtarget,
+                                    SelectionDAG &DAG, SDValue Base) {
+  if (!Subtarget.isPPC64() || !Base.getNode() ||
+      Base.getValueType() != MVT::i32 ||
+      Base.getOpcode() == ISD::TargetConstant ||
+      Base.getOpcode() == ISD::TargetFrameIndex)
+    return Base;
+  SDLoc dl(Base);
+  SDValue ImpDef(
+      DAG.getMachineNode(TargetOpcode::IMPLICIT_DEF, dl, MVT::i64), 0);
+  SDValue Sub32 = DAG.getTargetConstant(PPC::sub_32, dl, MVT::i32);
+  SDValue Wide(DAG.getMachineNode(TargetOpcode::INSERT_SUBREG, dl, MVT::i64,
+                                  ImpDef, Base, Sub32),
+               0);
+  SDValue SH = DAG.getTargetConstant(0, dl, MVT::i32);
+  SDValue MB = DAG.getTargetConstant(32, dl, MVT::i32);
+  return SDValue(
+      DAG.getMachineNode(PPC::RLDICL, dl, MVT::i64, Wide, SH, MB), 0);
+}
+
 /// SelectAddressRegReg - Given the specified addressed, check to see if it
 /// can be represented as an indexed [r+r] operation.  Returns false if it
 /// can be more efficiently represented as [r+imm]. If \p EncodingAlignment is
@@ -2777,7 +2806,7 @@ bool PPCTargetLowering::SelectAddressRegImm(
     Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
     fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
   } else
-    Base = N;
+    Base = zeroExtendPtrToGPR64(Subtarget, DAG, N);
   return true;      // [r+0]
 }
 
@@ -2935,6 +2964,18 @@ bool PPCTargetLowering::getPreIndexedAddressParts(SDNode *N, SDValue &Base,
                                                   SelectionDAG &DAG) const {
   if (DisablePPCPreinc) return false;
 
+  // The Xbox 360 (Xenon) target is ILP32-on-ppc64: 32-bit pointers held in
+  // 64-bit registers. The pre-increment update forms (LWZU/STWU/LDU/STDU, and
+  // their indexed variants) are matched with a 64-bit (G8RC) base register, but
+  // our base pointers are naturally i32 (GPRC). Rather than teach every pre-inc
+  // pattern to widen an i32 base, disable pre-increment addressing for this
+  // target: the pointer update is then materialized as an ordinary add, which
+  // the regular addressing-mode selection already widens correctly. This is a
+  // lost fusion optimization only, not a correctness issue -- revisit later to
+  // re-enable stwu/lwzu fusion for ILP32-on-ppc64.
+  if (Subtarget.isXbox360ABI())
+    return false;
+
   bool isLoad = true;
   SDValue Ptr;
   EVT VT;
@@ -3079,7 +3120,8 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     if (Subtarget.isUsingPCRelativeCalls()) {
       SDLoc DL(CP);
       EVT Ty = getPointerTy(DAG.getDataLayout());
@@ -3174,7 +3216,8 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetJumpTable(JT->getIndex(), PtrVT);
     return getTOCEntry(DAG, SDLoc(JT), GA);
@@ -3213,7 +3256,8 @@ SDValue PPCTargetLowering::LowerBlockAddress(SDValue Op,
 
   // 64-bit SVR4 ABI and AIX ABI code are always position-independent.
   // The actual BlockAddress is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {  // Xbox 360: no TOC, direct LIS/ORI
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetBlockAddress(BA, PtrVT, BASDN->getOffset());
     return getTOCEntry(DAG, SDLoc(BASDN), GA);
@@ -3568,7 +3612,11 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
 
   // 64-bit SVR4 ABI & AIX ABI code is always position-independent.
   // The actual address of the GlobalValue is stored in the TOC.
-  if (Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) {
+  // The Xbox 360 ILP32-on-ppc64 ABI has NO TOC (32-bit absolute addresses
+  // materialized directly), so it must not take the TOC path -- fall through to
+  // the direct LIS/ORI Hi/Lo materialization below.
+  if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI()) {
     if (Subtarget.isUsingPCRelativeCalls()) {
       EVT Ty = getPointerTy(DAG.getDataLayout());
       if (isAccessedAsGotIndirect(Op)) {
@@ -5413,8 +5461,11 @@ static bool isIndirectCall(const SDValue &Callee, SelectionDAG &DAG,
 
 // AIX and 64-bit ELF ABIs w/o PCRel require a TOC save/restore around calls.
 static inline bool isTOCSaveRestoreRequired(const PPCSubtarget &Subtarget) {
+  // The Xbox 360 ELFv2 target has no TOC, so an indirect call neither saves nor
+  // restores one (and must not emit the TOC-restore address arithmetic).
   return Subtarget.isAIXABI() ||
-         (Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls());
+         (Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls() &&
+          !Subtarget.isXbox360ABI());
 }
 
 static unsigned getCallOpcode(PPCTargetLowering::CallFlags CFlags,
@@ -5519,6 +5570,12 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
     return DAG.getMCSymbol(S, PtrVT);
   };
 
+  // A direct call's callee is a link-time relocation, so its nominal type is
+  // immaterial to the emitted `bl`. On the ILP32-on-ppc64 Xbox 360 target the
+  // pointer type is i32, but the ppc64 CALL patterns match a 64-bit callee, so
+  // materialize the callee symbol as i64 to select cleanly.
+  EVT CalleeVT = Subtarget.isXbox360ABI() ? MVT::i64 : Callee.getValueType();
+
   auto *G = dyn_cast<GlobalAddressSDNode>(Callee);
   const GlobalValue *GV = G ? G->getGlobal() : nullptr;
   if (isFunctionGlobalAddress(GV)) {
@@ -5527,7 +5584,7 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
     if (Subtarget.isAIXABI()) {
       return getAIXFuncEntryPointSymbolSDNode(GV);
     }
-    return DAG.getTargetGlobalAddress(GV, dl, Callee.getValueType(), 0,
+    return DAG.getTargetGlobalAddress(GV, dl, CalleeVT, 0,
                                       UsePlt ? PPCII::MO_PLT : 0);
   }
 
@@ -5555,7 +5612,7 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
 
       SymName = getExternalFunctionEntryPointSymbol(SymName)->getName().data();
     }
-    return DAG.getTargetExternalSymbol(SymName, Callee.getValueType(),
+    return DAG.getTargetExternalSymbol(SymName, CalleeVT,
                                        UsePlt ? PPCII::MO_PLT : 0);
   }
 
@@ -5583,6 +5640,11 @@ static SDValue getOutputChainFromCallSeq(SDValue CallSeqStart) {
 static void prepareIndirectCall(SelectionDAG &DAG, SDValue &Callee,
                                 SDValue &Glue, SDValue &Chain,
                                 const SDLoc &dl) {
+  // On the ILP32-on-ppc64 Xbox 360 target a function pointer is a 32-bit value,
+  // but the count register (CTR8) is 64-bit; zero-extend it so MTCTR/bctr get a
+  // full 64-bit callee address.
+  if (Callee.getValueType() == MVT::i32)
+    Callee = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i64, Callee);
   SDValue MTCTROps[] = {Chain, Callee, Glue};
   EVT ReturnTypes[] = {MVT::Other, MVT::Glue};
   Chain = DAG.getNode(PPCISD::MTCTR, dl, ReturnTypes,
@@ -5767,8 +5829,10 @@ buildCallOperands(SmallVectorImpl<SDValue> &Ops,
   // We cannot add R2/X2 as an operand here for PATCHPOINT, because there is
   // no way to mark dependencies as implicit here.
   // We will add the R2/X2 dependency in EmitInstrWithCustomInserter.
+  // The Xbox 360 ILP32-on-ppc64 ABI has no TOC, so r2 is not a call input.
   if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
-       !CFlags.IsPatchPoint && !Subtarget.isUsingPCRelativeCalls())
+       !CFlags.IsPatchPoint && !Subtarget.isUsingPCRelativeCalls() &&
+       !Subtarget.isXbox360ABI())
     Ops.push_back(DAG.getRegister(Subtarget.getTOCPointerRegister(), RegVT));
 
   // Add implicit use of CR bit 6 for 32-bit SVR4 vararg calls
@@ -5794,8 +5858,12 @@ SDValue PPCTargetLowering::FinishCall(
     unsigned NumBytes, const SmallVectorImpl<ISD::InputArg> &Ins,
     SmallVectorImpl<SDValue> &InVals, const CallBase *CB) const {
 
-  if ((Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls()) ||
-      Subtarget.isAIXABI())
+  // The Xbox 360 ILP32-on-ppc64 ABI has no TOC: a call neither sets up nor
+  // restores r2, so it must not mark the function as using the TOC base pointer
+  // (which would emit the ELFv2 global-entry-point r2 prologue).
+  if (((Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls()) ||
+       Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI())
     setUsesTOCBasePtr(DAG);
 
   unsigned CallOpc =
@@ -6460,7 +6528,12 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
 
       PtrOff = DAG.getConstant(ArgOffset, dl, StackPtr.getValueType());
 
-      PtrOff = DAG.getNode(ISD::ADD, dl, PtrVT, StackPtr, PtrOff);
+      // Stack-address arithmetic is done in the stack pointer's register width
+      // (X1 is 64-bit). On the ILP32-on-ppc64 target PtrVT is i32, so using it
+      // here would build an i32-result ADD over i64 operands; use StackPtr's
+      // type so caller/callee stack slots are computed as 64-bit addresses.
+      PtrOff = DAG.getNode(ISD::ADD, dl, StackPtr.getValueType(), StackPtr,
+                           PtrOff);
     };
 
     if (!IsFastCall) {
@@ -19756,6 +19829,13 @@ Sched::Preference PPCTargetLowering::getSchedulingPreference(SDNode *N) const {
 FastISel *PPCTargetLowering::createFastISel(
     FunctionLoweringInfo &FuncInfo, const TargetLibraryInfo *LibInfo,
     const LibcallLoweringInfo *LibcallLowering) const {
+  // PPCFastISel assumes ppc64 pointers are i64 (it asserts "Non-address!" on an
+  // i32 address). The Xbox 360 target is ILP32-on-ppc64 (i32 pointers), so
+  // FastISel would miscompile/crash at -O0. Fall back to SelectionDAG isel,
+  // which handles the 32-bit-pointer address modes correctly. Only affects
+  // -O0 compile speed, not correctness -- Debug titles still build.
+  if (Subtarget.isXbox360ABI())
+    return nullptr;
   return PPC::createFastISel(FuncInfo, LibInfo, LibcallLowering);
 }
 
@@ -20908,7 +20988,8 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
         if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Op0)) {
           Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
           fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
-        }
+        } else
+          Base = zeroExtendPtrToGPR64(Subtarget, DAG, Op0);
         break;
       }
     }
@@ -20920,7 +21001,7 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
              Disp.getOpcode() == ISD::TargetGlobalTLSAddress ||
              Disp.getOpcode() == ISD::TargetConstantPool ||
              Disp.getOpcode() == ISD::TargetJumpTable);
-      Base = N.getOperand(0);
+      Base = zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(0));
       break;
     }
     // This is a constant address at most 32 bits. The base will be
@@ -20958,7 +21039,7 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
       Base = DAG.getTargetFrameIndex(FI->getIndex(), N.getValueType());
       fixupFuncForFI(DAG, FI->getIndex(), N.getValueType());
     } else
-      Base = N;
+      Base = zeroExtendPtrToGPR64(Subtarget, DAG, N);
     break;
   }
   case PPC::AM_PrefixDForm: {
@@ -20990,10 +21071,10 @@ PPC::AddrMode PPCTargetLowering::SelectOptimalAddrMode(const SDNode *Parent,
   default: { // By default, X-Form is always available to be selected.
     // When a frame index is not aligned, we also match by XForm.
     FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(N);
-    Base = FI ? N : N.getOperand(1);
+    Base = FI ? N : zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(1));
     Disp = FI ? DAG.getRegister(Subtarget.isPPC64() ? PPC::ZERO8 : PPC::ZERO,
                                 N.getValueType())
-              : N.getOperand(0);
+              : zeroExtendPtrToGPR64(Subtarget, DAG, N.getOperand(0));
     break;
   }
   }

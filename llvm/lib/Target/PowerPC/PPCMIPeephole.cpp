@@ -454,6 +454,15 @@ void PPCMIPeephole::convertUnprimedAccPHIs(
 
 // Perform peephole optimizations.
 bool PPCMIPeephole::simplifyCode() {
+  // TODO(Xbox 360 ILP32-on-ppc64): several of these MI peepholes assume
+  // TOC-based globals / 64-bit addresses and mishandle the 32-bit-absolute
+  // LI/LIS + zero-extend pointer materialization this target emits (they take
+  // an operand as an immediate that is actually a global address). Skip the MI
+  // peephole for this target for now -- correctness over optimization -- until
+  // each transform is taught the ILP32 forms.
+  if (MF->getSubtarget<PPCSubtarget>().isXbox360ABI())
+    return false;
+
   bool Simplified = false;
   bool TrapOpt = false;
   MachineInstr* ToErase = nullptr;
