@@ -40,9 +40,15 @@ EnablePEVectorSpills("ppc-enable-pe-vector-spills",
                      cl::desc("Enable spills in prologue to vector registers."),
                      cl::init(false), cl::Hidden);
 
-static unsigned computeReturnSaveOffset(const PPCSubtarget &STI) {
+static uint64_t computeReturnSaveOffset(const PPCSubtarget &STI) {
+  // The Xbox 360 saves LR at CallerSP-8, a NEGATIVE offset. Return it as a
+  // full-width two's-complement value (not a 32-bit -8U, which would zero-extend
+  // into the uint64_t member and read back as a large positive number). The
+  // epilogue guards the LR reload with isInt<16>(getReturnSaveOffset()+SPAdd);
+  // a large positive there silently skips the reload, so `mtlr` restores a
+  // stale r0 and non-leaf functions return to a garbage address.
   if (STI.isXbox360ABI())
-    return -8U;
+    return (uint64_t)-8;
   if (STI.isAIXABI())
     return STI.isPPC64() ? 16 : 8;
   // SVR4 ABI:
