@@ -1469,7 +1469,11 @@ void PPC64::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
     if (ctx.arg.tocOptimize && shouldTocOptimize && ha(val) == 0)
       writeFromHalf16(ctx, loc, NOP);
     else {
-      checkInt(ctx, loc, val + 0x8000, 32, rel);
+      // Accept a 32-bit absolute address whether read as signed or unsigned:
+      // the Xbox 360 ILP32-on-ppc64 image loads high (>= 0x80000000), so its
+      // addresses are "negative" in signed 32-bit. R_PPC64_ADDR32 above already
+      // uses checkIntUInt for the same reason; the HA/HI halves must match.
+      checkIntUInt(ctx, loc, val + 0x8000, 32, rel);
       write16(ctx, loc, ha(val));
     }
     break;
@@ -1485,7 +1489,9 @@ void PPC64::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
   case R_PPC64_ADDR16_HI:
   case R_PPC64_REL16_HI:
   case R_PPC64_TPREL16_HI:
-    checkInt(ctx, loc, val, 32, rel);
+    // See R_PPC64_ADDR16_HA: accept a 32-bit absolute address read as signed or
+    // unsigned so the Xbox 360 high (>= 0x80000000) ILP32 image links.
+    checkIntUInt(ctx, loc, val, 32, rel);
     write16(ctx, loc, hi(val));
     break;
   case R_PPC64_ADDR16_HIGH:
