@@ -194,6 +194,14 @@ static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
 
 static PPCTargetMachine::PPCABI computeTargetABI(const Triple &TT,
                                                  const TargetOptions &Options) {
+  // The Xbox 360 has neither function descriptors nor a TOC, so it presents as
+  // ELFv2 for those purposes. Its linkage area size and its rule that the
+  // parameter save area is always allocated are handled separately. Xenon has
+  // exactly one ABI, so force ELFv2 ahead of the -target-abi option: the ppc64
+  // driver default is elfv1, and an .opd/TOC object would be unloadable here.
+  if (TT.getOS() == Triple::Xbox360)
+    return PPCTargetMachine::PPC_ABI_ELFv2;
+
   if (Options.MCOptions.getABIName().starts_with("elfv1"))
     return PPCTargetMachine::PPC_ABI_ELFv1;
   else if (Options.MCOptions.getABIName().starts_with("elfv2"))
@@ -201,12 +209,6 @@ static PPCTargetMachine::PPCABI computeTargetABI(const Triple &TT,
 
   assert(Options.MCOptions.getABIName().empty() &&
          "Unknown target-abi option!");
-
-  // The Xbox 360 has neither function descriptors nor a TOC, so it presents as
-  // ELFv2 for those purposes. Its linkage area size and its rule that the
-  // parameter save area is always allocated are handled separately.
-  if (TT.getOS() == Triple::Xbox360)
-    return PPCTargetMachine::PPC_ABI_ELFv2;
 
   switch (TT.getArch()) {
   case Triple::ppc64le:

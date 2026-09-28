@@ -2125,8 +2125,11 @@ void PPCLinuxAsmPrinter::emitFunctionBodyStart() {
                           !MF->getRegInfo().use_empty(PPC::R2);
   const bool PCrelGEPRequired = Subtarget->isUsingPCRelativeCalls() &&
                                 UsesX2OrR2 && PPCFI->usesTOCBasePtr();
+  // The Xbox 360 ILP32-on-ppc64 target has no TOC, so it never needs the ELFv2
+  // global-entry-point r2 prologue (r2 is reserved, not the TOC pointer).
   const bool NonPCrelGEPRequired = !Subtarget->isUsingPCRelativeCalls() &&
-                                   Subtarget->isELFv2ABI() && UsesX2OrR2;
+                                   Subtarget->isELFv2ABI() && UsesX2OrR2 &&
+                                   !Subtarget->isXbox360ABI();
 
   // Only do all that if the function uses R2 as the TOC pointer
   // in the first place. We don't need the global entry point if the

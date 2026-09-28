@@ -5829,8 +5829,10 @@ buildCallOperands(SmallVectorImpl<SDValue> &Ops,
   // We cannot add R2/X2 as an operand here for PATCHPOINT, because there is
   // no way to mark dependencies as implicit here.
   // We will add the R2/X2 dependency in EmitInstrWithCustomInserter.
+  // The Xbox 360 ILP32-on-ppc64 ABI has no TOC, so r2 is not a call input.
   if ((Subtarget.is64BitELFABI() || Subtarget.isAIXABI()) &&
-       !CFlags.IsPatchPoint && !Subtarget.isUsingPCRelativeCalls())
+       !CFlags.IsPatchPoint && !Subtarget.isUsingPCRelativeCalls() &&
+       !Subtarget.isXbox360ABI())
     Ops.push_back(DAG.getRegister(Subtarget.getTOCPointerRegister(), RegVT));
 
   // Add implicit use of CR bit 6 for 32-bit SVR4 vararg calls
@@ -5856,8 +5858,12 @@ SDValue PPCTargetLowering::FinishCall(
     unsigned NumBytes, const SmallVectorImpl<ISD::InputArg> &Ins,
     SmallVectorImpl<SDValue> &InVals, const CallBase *CB) const {
 
-  if ((Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls()) ||
-      Subtarget.isAIXABI())
+  // The Xbox 360 ILP32-on-ppc64 ABI has no TOC: a call neither sets up nor
+  // restores r2, so it must not mark the function as using the TOC base pointer
+  // (which would emit the ELFv2 global-entry-point r2 prologue).
+  if (((Subtarget.is64BitELFABI() && !Subtarget.isUsingPCRelativeCalls()) ||
+       Subtarget.isAIXABI()) &&
+      !Subtarget.isXbox360ABI())
     setUsesTOCBasePtr(DAG);
 
   unsigned CallOpc =

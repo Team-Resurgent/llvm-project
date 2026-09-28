@@ -1154,7 +1154,10 @@ public:
     return (getArch() == Triple::ppc64 &&
             ((getOS() == Triple::FreeBSD &&
               (getOSMajorVersion() >= 13 || getOSVersion().empty())) ||
-             getOS() == Triple::OpenBSD || isMusl()));
+             getOS() == Triple::OpenBSD || isMusl() ||
+             // The Xbox 360 (Xenon) is ILP32-on-ppc64 and direct-entry: no
+             // function descriptors and no TOC, i.e. ELFv2 for those purposes.
+             getOS() == Triple::Xbox360));
   }
 
   /// Tests whether the target 32-bit PowerPC uses Secure PLT.
