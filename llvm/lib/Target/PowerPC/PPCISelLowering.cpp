@@ -4672,7 +4672,10 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
         if (GPR_idx != Num_GPR_Regs) {
           Register VReg = MF.addLiveIn(GPR[GPR_idx++], &PPC::G8RCRegClass);
           FuncInfo->addLiveInAttr(VReg, Flags);
-          SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, PtrVT);
+          // G8RC is 64-bit; copy the full register (PtrVT would be i32 on the
+          // Xbox 360 ILP32-on-ppc64 target, making the store to an <= 8-byte
+          // slot an illegal extending store).
+          SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, MVT::i64);
           EVT ObjType = EVT::getIntegerVT(*DAG.getContext(), ObjSize * 8);
           SDValue Store =
               DAG.getTruncStore(Val.getValue(1), dl, Val, Arg,
@@ -4696,7 +4699,8 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
 
         Register VReg = MF.addLiveIn(GPR[GPR_idx], &PPC::G8RCRegClass);
         FuncInfo->addLiveInAttr(VReg, Flags);
-        SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, PtrVT);
+        // Copy the full 64-bit G8RC register (see above).
+        SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, MVT::i64);
         SDValue Addr = FIN;
         if (j) {
           SDValue Off = DAG.getConstant(j, dl, PtrVT);
@@ -6595,7 +6599,8 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
         if (!isLittleEndian) {
           SDValue Const = DAG.getConstant(PtrByteSize - Size, dl,
                                           PtrOff.getValueType());
-          AddPtr = DAG.getNode(ISD::ADD, dl, PtrVT, PtrOff, Const);
+          AddPtr = DAG.getNode(ISD::ADD, dl, PtrOff.getValueType(), PtrOff,
+                               Const);
         }
         Chain = CallSeqStart = createMemcpyOutsideCallSeq(Arg, AddPtr,
                                                           CallSeqStart,
@@ -6627,7 +6632,8 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
         SDValue AddPtr = PtrOff;
         if (!isLittleEndian) {
           SDValue Const = DAG.getConstant(8 - Size, dl, PtrOff.getValueType());
-          AddPtr = DAG.getNode(ISD::ADD, dl, PtrVT, PtrOff, Const);
+          AddPtr = DAG.getNode(ISD::ADD, dl, PtrOff.getValueType(), PtrOff,
+                               Const);
         }
         Chain = CallSeqStart = createMemcpyOutsideCallSeq(Arg, AddPtr,
                                                           CallSeqStart,
@@ -6647,12 +6653,20 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
       // For aggregates larger than PtrByteSize, copy the pieces of the
       // object that fit into registers from the parameter save area.
       for (unsigned j=0; j<Size; j+=PtrByteSize) {
-        SDValue Const = DAG.getConstant(j, dl, PtrOff.getValueType());
-        SDValue AddArg = DAG.getNode(ISD::ADD, dl, PtrVT, Arg, Const);
+        // The Xbox 360 ILP32-on-ppc64 target keeps addresses in 64-bit
+        // registers, so Arg is i64 while PtrVT is i32; do the offset arithmetic
+        // in Arg's own type instead of PtrVT so the ADD's result and operand
+        // types match.
+        SDValue Const = DAG.getConstant(j, dl, Arg.getValueType());
+        SDValue AddArg =
+            DAG.getNode(ISD::ADD, dl, Arg.getValueType(), Arg, Const);
         if (GPR_idx != NumGPRs) {
           unsigned LoadSizeInBits = std::min(PtrByteSize, (Size - j)) * 8;
           EVT ObjType = EVT::getIntegerVT(*DAG.getContext(), LoadSizeInBits);
-          SDValue Load = DAG.getExtLoad(ISD::EXTLOAD, dl, PtrVT, Chain, AddArg,
+          // The 8-byte chunk is passed in a 64-bit GPR, so the load result must
+          // be i64 (extending a partial tail chunk). PtrVT would be i32 on the
+          // Xbox 360 ILP32-on-ppc64 target, making this a truncating load.
+          SDValue Load = DAG.getExtLoad(ISD::EXTLOAD, dl, MVT::i64, Chain, AddArg,
                                         MachinePointerInfo(), ObjType);
 
           MemOpChains.push_back(Load.getValue(1));
