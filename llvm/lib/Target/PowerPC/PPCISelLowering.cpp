@@ -4881,11 +4881,17 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
     for (GPR_idx = (ArgOffset - LinkageSize) / PtrByteSize;
          GPR_idx < Num_GPR_Regs; ++GPR_idx) {
       Register VReg = MF.addLiveIn(GPR[GPR_idx], &PPC::G8RCRegClass);
-      SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, PtrVT);
+      // The vararg save area uses 8-byte (register-width) slots. Store the full
+      // 64-bit argument register, not a truncated PtrVT (i32 on the Xbox 360
+      // ILP32-on-ppc64 target): big-endian, a later va_arg of a 32-bit type
+      // reads from slot+4 (the low word), which is where the full-register store
+      // places it. Truncating to i32 would stw the value at slot+0 and va_arg
+      // would read the adjacent slot's bytes. Normal ppc64 already has i64 here.
+      SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, MVT::i64);
       SDValue Store =
           DAG.getStore(Val.getValue(1), dl, Val, FIN, MachinePointerInfo());
       MemOps.push_back(Store);
-      // Increment the address by four for the next argument to store
+      // Increment the address by PtrByteSize (8) for the next argument slot.
       SDValue PtrOff = DAG.getConstant(PtrByteSize, dl, PtrVT);
       FIN = DAG.getNode(ISD::ADD, dl, PtrOff.getValueType(), FIN, PtrOff);
     }
