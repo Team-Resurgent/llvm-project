@@ -234,6 +234,18 @@ void TargetLoweringObjectFileELF::Initialize(MCContext &Ctx,
     break;
   case Triple::ppc64:
   case Triple::ppc64le:
+    // The Xbox 360 is ILP32-on-ppc64: code and data live in the low 4GB and all
+    // EH pointers are 32-bit. Emit 4-byte pcrel EH encodings (as ppc32 and the
+    // AArch64 ILP32 ABI do) instead of the 8-byte ppc64 defaults, so the
+    // personality/type-table entries the unwinder reads are the right width.
+    if (TgtM.getTargetTriple().getOS() == Triple::Xbox360) {
+      PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata4;
+      LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+      TTypeEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata4;
+      break;
+    }
     PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
       dwarf::DW_EH_PE_udata8;
     LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_udata8;
