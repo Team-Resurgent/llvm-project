@@ -668,6 +668,43 @@ bool ConstStructBuilder::AppendBitField(const FieldDecl *Field,
   if (Info.Size < FieldValue.getBitWidth())
     FieldValue = FieldValue.trunc(Info.Size);
 
+  // On a big-endian target that allocates bit-fields least-significant-bit
+  // first (the MS Xbox 360 convention), a bit-field occupies bits
+  // [Info.Offset, Info.Offset + Info.Size) counted from the least-significant
+  // bit of its storage unit, and that unit is loaded and stored as one
+  // big-endian integer -- so unit bit K lives in the unit's byte
+  // (StorageSize/8 - 1 - K/8), not in byte K/8 from the front. Place the field
+  // one byte of the unit at a time to match the code generated for loads and
+  // stores; addBits() numbers bits within a byte from the least-significant
+  // bit on such targets.
+  //
+  // Low fields land at high addresses, so a unit fills from its last byte
+  // down and a later field's bytes can fall on the padding the builder laid
+  // down in front of an earlier field's. Distinct bit-fields never share bits
+  // (partial bytes are merged, keeping the other fields' bits), so that
+  // padding is all there is to overwrite.
+  if (CGM.getDataLayout().isBigEndian() &&
+      CGM.getContext().getTargetInfo().useLSBFirstBitfields()) {
+    const uint64_t CharWidth = CGM.getContext().getCharWidth();
+    const uint64_t StorageStart =
+        CGM.getContext().toBits(StartOffset) + FieldOffset - Info.Offset;
+    const uint64_t StorageChars = Info.StorageSize / CharWidth;
+    const uint64_t End = Info.Offset + Info.Size;
+    for (uint64_t Lo = Info.Offset; Lo < End;) {
+      const uint64_t UnitChar = Lo / CharWidth;
+      const uint64_t Hi = std::min(End, (UnitChar + 1) * CharWidth);
+      llvm::APInt Chunk = FieldValue.extractBits(Hi - Lo, Lo - Info.Offset);
+      const uint64_t MemChar = StorageChars - 1 - UnitChar;
+      if (!Builder.addBits(Chunk,
+                           StorageStart + MemChar * CharWidth +
+                               (Lo - UnitChar * CharWidth),
+                           /*AllowOverwrite=*/true))
+        return false;
+      Lo = Hi;
+    }
+    return true;
+  }
+
   return Builder.addBits(FieldValue,
                          CGM.getContext().toBits(StartOffset) + FieldOffset,
                          AllowOverwrite);
@@ -1003,6 +1040,36 @@ bool ConstStructBuilder::Build(const APValue &Val, const RecordDecl *RD,
 bool ConstStructBuilder::DoZeroInitPadding(
     const ASTRecordLayout &Layout, unsigned FieldNo, const FieldDecl &Field,
     bool AllowOverwrite, CharUnits &SizeSoFar, bool &ZeroFieldSize) {
+  // Where bit-fields are allocated least-significant-bit first on a big-endian
+  // target, a field's bits are not at its declaration-order offset in memory:
+  // low fields sit at the end of their storage unit, and the unused bits of a
+  // partly filled unit are at its front. So account for padding a whole unit
+  // at a time: when the first field of a unit is reached, pad up to the unit
+  // and fill the unit itself (AppendBitField then merges each field's bits
+  // into it), and count the unit as covered.
+  if (Field.isBitField() && CGM.getDataLayout().isBigEndian() &&
+      CGM.getContext().getTargetInfo().useLSBFirstBitfields()) {
+    const CGRecordLayout &RL =
+        CGM.getTypes().getCGRecordLayout(Field.getParent());
+    const CGBitFieldInfo &Info = RL.getBitFieldInfo(&Field);
+    const CharUnits UnitStart = Info.StorageOffset;
+    const CharUnits UnitEnd =
+        UnitStart + CGM.getContext().toCharUnitsFromBits(Info.StorageSize);
+    if (SizeSoFar < UnitEnd) {
+      if (SizeSoFar < UnitStart &&
+          !AppendBytes(SizeSoFar, getPadding(CGM, UnitStart - SizeSoFar),
+                       AllowOverwrite))
+        return false;
+      const CharUnits FillStart = std::max(SizeSoFar, UnitStart);
+      if (!AppendBytes(FillStart, getPadding(CGM, UnitEnd - FillStart),
+                       AllowOverwrite))
+        return false;
+      SizeSoFar = UnitEnd;
+    }
+    ZeroFieldSize = Info.Size == 0;
+    return true;
+  }
+
   uint64_t StartBitOffset = Layout.getFieldOffset(FieldNo);
   CharUnits StartOffset = CGM.getContext().toCharUnitsFromBits(StartBitOffset);
   if (SizeSoFar < StartOffset)
