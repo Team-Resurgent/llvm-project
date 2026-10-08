@@ -1088,6 +1088,12 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (TI.isBigEndian()) {
     Builder.defineMacro("__BYTE_ORDER__", "__ORDER_BIG_ENDIAN__");
     Builder.defineMacro("__BIG_ENDIAN__");
+    // Big-endian targets normally allocate bit-fields most-significant-bit
+    // first; say so when this one does not (the MS Xbox 360 convention), so
+    // code that overlays bit-fields of different storage widths -- libc++'s
+    // std::string representation, for one -- can lay them out to match.
+    if (TI.useLSBFirstBitfields())
+      Builder.defineMacro("__BITFIELDS_LSB_FIRST__");
   } else {
     Builder.defineMacro("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
     Builder.defineMacro("__LITTLE_ENDIAN__");
