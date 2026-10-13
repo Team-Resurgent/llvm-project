@@ -2457,19 +2457,19 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, Register SrcReg,
   if (DisableCmpOpt)
     return false;
 
-  // The Xbox 360 (Xenon) miscompiles with this compare-to-record-form
-  // optimization enabled: it turns "compare + branch" into record-form (dot)
-  // instructions and rewrites the branch predicates, and while each rewrite
-  // looks individually correct, the result changes program behaviour (found in
-  // picolibc's vfprintf float branch -- %f/%g emitted nothing past the
-  // conversion). Bisecting the backend passes pinned it to this optimization
-  // (equivalent to -disable-ppc-cmp-opt), which is the same subtle-CR0 hazard
-  // its own comment below warns about. Disable it for that target until the
-  // exact defective substitution is isolated.
-  if (Subtarget.isXbox360ABI())
-    return false;
-
   int OpC = CmpInstr.getOpcode();
+
+  // Xbox 360 titles run in the 32-bit computation mode (MSR[SF]=0): a record
+  // form sets CR0 from the low 32 bits of its result, so it cannot stand in for
+  // a 64-bit compare. The 32-bit compares are folded under the PPC64 rules
+  // below, which are conservative in 32-bit mode. (This optimization used to be
+  // disabled for the target after picolibc's vfprintf printed nothing for
+  // %f/%g under xenia; that was xenia's mcrf, which a fold can introduce, not
+  // the fold.)
+  if (Subtarget.isXbox360ABI() &&
+      (OpC == PPC::CMPD || OpC == PPC::CMPDI || OpC == PPC::CMPLD ||
+       OpC == PPC::CMPLDI))
+    return false;
   Register CRReg = CmpInstr.getOperand(0).getReg();
 
   // FP record forms set CR1 based on the exception status bits, not a
@@ -2873,6 +2873,11 @@ bool PPCInstrInfo::optimizeCmpPostRA(MachineInstr &CmpMI) const {
   // comparison. Since we can't do the equality checks in post-RA, we bail out
   // the case.
   if (Subtarget.isPPC64() && Opc == PPC::CMPWI)
+    return false;
+
+  // Xbox 360 (32-bit computation mode): a record form compares only the low
+  // 32 bits of its result, not the 64 bits a CMPDI does.
+  if (Subtarget.isXbox360ABI() && Opc == PPC::CMPDI)
     return false;
 
   // CmpMI can't be deleted if it has implicit def.
