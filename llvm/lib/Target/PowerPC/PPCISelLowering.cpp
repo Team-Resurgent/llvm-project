@@ -1047,6 +1047,14 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
     setOperationAction(ISD::MUL, MVT::v8i16, Legal);
     setOperationAction(ISD::MUL, MVT::v16i8, Custom);
 
+    // Xenon's VMX does not implement the AltiVec integer multiplies (vmule*,
+    // vmulo*, vmladduhm, vmhaddshs, vmhraddshs, vmsum*, vsum*: each is an
+    // illegal instruction on the console), which is how these lower; multiply
+    // the elements one at a time instead.
+    if (Subtarget.isXbox360ABI())
+      setOperationAction(ISD::MUL, {MVT::v4i32, MVT::v8i16, MVT::v16i8},
+                         Expand);
+
     setOperationAction(ISD::SCALAR_TO_VECTOR, MVT::v4f32, Custom);
     setOperationAction(ISD::SCALAR_TO_VECTOR, MVT::v4i32, Custom);
     // LE is P8+/64-bit so direct moves are supported and these operations
