@@ -4040,6 +4040,14 @@ SDValue IntegerCompareEliminator::getSETCCInGPR(SDValue Compare,
   bool IsSext = ConvOpts == SetccInGPROpts::SExtOrig ||
     ConvOpts == SetccInGPROpts::SExtInvert;
 
+  // Xbox 360 titles run in the 32-bit computation mode: XER[CA] is the carry
+  // out of the low 32 bits, but the 64-bit sequences below (addic/subfe,
+  // subfc/adde, ...) rely on the 64-bit carry. The 32-bit ones work on
+  // extended values with plain arithmetic, which is mode-independent.
+  if (!Inputs32Bit &&
+      CurDAG->getMachineFunction().getSubtarget<PPCSubtarget>().isXbox360ABI())
+    return SDValue();
+
   if (IsSext && Inputs32Bit)
     return get32BitSExtCompare(LHS, RHS, CC, RHSValue, dl);
   else if (Inputs32Bit)
