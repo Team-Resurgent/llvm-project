@@ -234,8 +234,11 @@ bool PPCCTRLoops::processLoop(MachineLoop *ML) {
 
 void PPCCTRLoops::expandNormalLoops(MachineLoop *ML, MachineInstr *Start,
                                     MachineInstr *Dec) {
-  bool Is64Bit =
-      Start->getParent()->getParent()->getSubtarget<PPCSubtarget>().isPPC64();
+  // The width of the loop's own count (MTCTRloop/MTCTR8loop), which is not the
+  // register width when a PPC64 target uses a 32-bit hardware-loop count (the
+  // Xbox 360's 32-bit computation mode). Counting a 32-bit count down with a
+  // 64-bit compare never terminates if its register's upper half is not zero.
+  bool Is64Bit = Start->getOpcode() == PPC::MTCTR8loop;
 
   MachineBasicBlock *Preheader = Start->getParent();
   MachineBasicBlock *Exiting = Dec->getParent();
@@ -310,8 +313,8 @@ void PPCCTRLoops::expandNormalLoops(MachineLoop *ML, MachineInstr *Start,
 
 void PPCCTRLoops::expandCTRLoops(MachineLoop *ML, MachineInstr *Start,
                                  MachineInstr *Dec) {
-  bool Is64Bit =
-      Start->getParent()->getParent()->getSubtarget<PPCSubtarget>().isPPC64();
+  // As in expandNormalLoops: the loop's count width, not the register width.
+  bool Is64Bit = Start->getOpcode() == PPC::MTCTR8loop;
 
   MachineBasicBlock *Preheader = Start->getParent();
   MachineBasicBlock *Exiting = Dec->getParent();

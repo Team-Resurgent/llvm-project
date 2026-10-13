@@ -790,11 +790,35 @@ public:
 private:
   static_assert(CHAR_BIT == 8, "This implementation assumes that one byte contains 8 bits");
 
+  // The long and short representations overlay a 1-bit __is_long_ flag held in
+  // bit-fields of different storage widths (size_type and unsigned char), so the
+  // two flags only share a bit if the compiler allocates bit-fields in the order
+  // the layouts below assume: most-significant-bit first on big-endian targets,
+  // least-significant-bit first on little-endian ones. A big-endian target that
+  // allocates them least-significant-bit first (the MS Xbox 360 convention,
+  // advertised by clang as __BITFIELDS_LSB_FIRST__) needs each bit-field pair
+  // declared in the opposite order to land the flags on the same bit. The
+  // __endian_factor of each layout stays correct either way.
+#  if defined(_LIBCPP_BIG_ENDIAN) && defined(__BITFIELDS_LSB_FIRST__)
+#    define _LIBCPP_STRING_REVERSE_BITFIELDS
+#  endif
+
 #  ifdef _LIBCPP_ABI_ALTERNATE_STRING_LAYOUT
 
   struct __long {
     __long() = default;
 
+#    ifdef _LIBCPP_STRING_REVERSE_BITFIELDS
+    _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 __long(__alloc_result __alloc, size_type __size)
+        : __data_(__alloc.ptr), __size_(__size), __is_long_(true), __cap_(__alloc.count / __endian_factor) {
+      _LIBCPP_ASSERT_INTERNAL(!__fits_in_sso(__alloc.count), "Long capacity should always be larger than the SSO");
+    }
+
+    pointer __data_;
+    size_type __size_;
+    size_type __is_long_ : 1;
+    size_type __cap_ : sizeof(size_type) * CHAR_BIT - 1;
+#    else
     _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 __long(__alloc_result __alloc, size_type __size)
         : __data_(__alloc.ptr), __size_(__size), __cap_(__alloc.count / __endian_factor), __is_long_(true) {
       _LIBCPP_ASSERT_INTERNAL(!__fits_in_sso(__alloc.count), "Long capacity should always be larger than the SSO");
@@ -804,6 +828,7 @@ private:
     size_type __size_;
     size_type __cap_ : sizeof(size_type) * CHAR_BIT - 1;
     size_type __is_long_ : 1;
+#    endif
   };
 
   enum { __min_cap = (sizeof(__long) - 1) / sizeof(value_type) > 2 ? (sizeof(__long) - 1) / sizeof(value_type) : 2 };
@@ -811,8 +836,13 @@ private:
   struct __short {
     value_type __data_[__min_cap];
     _LIBCPP_NO_UNIQUE_ADDRESS __padding<sizeof(value_type) - 1> __padding_;
+#    ifdef _LIBCPP_STRING_REVERSE_BITFIELDS
+    unsigned char __is_long_ : 1;
+    unsigned char __size_    : 7;
+#    else
     unsigned char __size_    : 7;
     unsigned char __is_long_ : 1;
+#    endif
   };
 
   // The __endian_factor is required because the field we use to store the size
@@ -849,6 +879,17 @@ private:
   struct __long {
     __long() = default;
 
+#    ifdef _LIBCPP_STRING_REVERSE_BITFIELDS
+    _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 __long(__alloc_result __alloc, size_type __size)
+        : __cap_(__alloc.count / __endian_factor), __is_long_(true), __size_(__size), __data_(__alloc.ptr) {
+      _LIBCPP_ASSERT_INTERNAL(!__fits_in_sso(__alloc.count), "Long capacity should always be larger than the SSO");
+    }
+
+    struct _LIBCPP_PACKED {
+      size_type __cap_ : sizeof(size_type) * CHAR_BIT - 1;
+      size_type __is_long_ : 1;
+    };
+#    else
     _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 __long(__alloc_result __alloc, size_type __size)
         : __is_long_(true), __cap_(__alloc.count / __endian_factor), __size_(__size), __data_(__alloc.ptr) {
       _LIBCPP_ASSERT_INTERNAL(!__fits_in_sso(__alloc.count), "Long capacity should always be larger than the SSO");
@@ -858,6 +899,7 @@ private:
       size_type __is_long_ : 1;
       size_type __cap_ : sizeof(size_type) * CHAR_BIT - 1;
     };
+#    endif
     size_type __size_;
     pointer __data_;
   };
@@ -866,14 +908,21 @@ private:
 
   struct __short {
     struct _LIBCPP_PACKED {
+#    ifdef _LIBCPP_STRING_REVERSE_BITFIELDS
+      unsigned char __size_    : 7;
+      unsigned char __is_long_ : 1;
+#    else
       unsigned char __is_long_ : 1;
       unsigned char __size_    : 7;
+#    endif
     };
     _LIBCPP_NO_UNIQUE_ADDRESS __padding<sizeof(value_type) - 1> __padding_;
     value_type __data_[__min_cap];
   };
 
 #  endif // _LIBCPP_ABI_ALTERNATE_STRING_LAYOUT
+
+#  undef _LIBCPP_STRING_REVERSE_BITFIELDS
 
   static_assert(sizeof(__short) == (sizeof(value_type) * (__min_cap + 1)), "__short has an unexpected size.");
 

@@ -3419,8 +3419,14 @@ void MicrosoftRecordLayoutBuilder::computeVtorDispSet(
 }
 
 bool ASTContext::defaultsToMsStruct() const {
+  // The Xbox 360's platform compiler is MSVC: its system libraries and GPU
+  // register structs use MSVC's bit-field rules (each declared type is its own
+  // storage unit, :0 only matters after a bit-field, ...). Like MinGW, keep the
+  // Itanium C++ ABI but lay records out with those rules so structs shared with
+  // the MS-compiled libraries match.
   return getTargetInfo().hasMicrosoftRecordLayout() ||
-         getTargetInfo().getTriple().isWindowsGNUEnvironment();
+         getTargetInfo().getTriple().isWindowsGNUEnvironment() ||
+         getTargetInfo().getTriple().getOS() == llvm::Triple::Xbox360;
 }
 
 const ASTRecordLayout &

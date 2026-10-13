@@ -210,6 +210,16 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
   setOperationAction(ISD::UADDO_CARRY, RegVT, Custom);
   setOperationAction(ISD::USUBO_CARRY, RegVT, Custom);
 
+  // Xbox 360 titles run in the 32-bit computation mode (MSR[SF]=0): the
+  // registers and the 64-bit instructions are full width, but XER[CA] is the
+  // carry out of the low 32 bits. A 64-bit add/subtract-with-carry chain would
+  // propagate the wrong carry, so compute 64-bit carries and borrows with
+  // compares instead.
+  if (Subtarget.isXbox360ABI())
+    setOperationAction(
+        {ISD::UADDO, ISD::USUBO, ISD::UADDO_CARRY, ISD::USUBO_CARRY}, MVT::i64,
+        Expand);
+
   // On P10, the default lowering generates better code using the
   // setbc instruction.
   if (!Subtarget.hasP10Vector()) {
@@ -608,6 +618,10 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
   setOperationAction(ISD::UCMP, MVT::i64, isPPC64 ? Custom : Expand);
   setOperationAction(ISD::ABDU, MVT::i32, Custom);
   setOperationAction(ISD::ABDU, MVT::i64, isPPC64 ? Custom : Expand);
+  // The custom lowerings compute with a 64-bit carry chain on PPC64 (see the
+  // Xbox 360 note on UADDO_CARRY above).
+  if (Subtarget.isXbox360ABI())
+    setOperationAction({ISD::UCMP, ISD::ABDU}, {MVT::i32, MVT::i64}, Expand);
 
   // NOTE: EH_SJLJ_SETJMP/_LONGJMP supported here is NOT intended to support
   // SjLj exception handling but a light-weight setjmp/longjmp replacement to
@@ -1032,6 +1046,14 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
 
     setOperationAction(ISD::MUL, MVT::v8i16, Legal);
     setOperationAction(ISD::MUL, MVT::v16i8, Custom);
+
+    // Xenon's VMX does not implement the AltiVec integer multiplies (vmule*,
+    // vmulo*, vmladduhm, vmhaddshs, vmhraddshs, vmsum*, vsum*: each is an
+    // illegal instruction on the console), which is how these lower; multiply
+    // the elements one at a time instead.
+    if (Subtarget.isXbox360ABI())
+      setOperationAction(ISD::MUL, {MVT::v4i32, MVT::v8i16, MVT::v16i8},
+                         Expand);
 
     setOperationAction(ISD::SCALAR_TO_VECTOR, MVT::v4f32, Custom);
     setOperationAction(ISD::SCALAR_TO_VECTOR, MVT::v4i32, Custom);
@@ -16294,6 +16316,13 @@ SDValue PPCTargetLowering::combineSignExtendSetCC(SDNode *N,
   if (N0.getOpcode() != ISD::SETCC)
     return SDValue();
 
+  // Xbox 360 (32-bit computation mode): the 64-bit ADDC below carries out of
+  // the low 32 bits. That still tests "X != 0" for a zero-extended 32-bit X,
+  // but not for a 64-bit one; keep it simple and use the generic lowering, so
+  // no 64-bit carry is ever consumed on this target (see PPCXbox360ModeCheck).
+  if (Subtarget.isXbox360ABI())
+    return SDValue();
+
   ISD::CondCode CC = cast<CondCodeSDNode>(N0.getOperand(2))->get();
   SDValue LHS = N0.getOperand(0);
   SDValue RHS = N0.getOperand(1);
@@ -20144,7 +20173,9 @@ SDValue PPCTargetLowering::combineSRL(SDNode *N, DAGCombinerInfo &DCI) const {
 // Requirement: -C in [-32768, 32767], X and Z are MVT::i64 types
 static SDValue combineADDToADDZE(SDNode *N, SelectionDAG &DAG,
                                  const PPCSubtarget &Subtarget) {
-  if (!Subtarget.isPPC64())
+  // Xbox 360 (32-bit computation mode): addic/subfic on a 64-bit Z set the
+  // carry from its low 32 bits only.
+  if (!Subtarget.isPPC64() || Subtarget.isXbox360ABI())
     return SDValue();
 
   SDValue LHS = N->getOperand(0);

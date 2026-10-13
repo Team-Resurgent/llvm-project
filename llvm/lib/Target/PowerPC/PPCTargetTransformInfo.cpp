@@ -403,8 +403,13 @@ bool PPCTTIImpl::isHardwareLoopProfitable(Loop *L, ScalarEvolution &SE,
   }
 
   LLVMContext &C = L->getHeader()->getContext();
-  HWLoopInfo.CountType = TM.isPPC64() ?
-    Type::getInt64Ty(C) : Type::getInt32Ty(C);
+  // Xbox 360 titles run in the 32-bit computation mode, where bdnz tests only
+  // the low 32 bits of CTR: a CTR loop is only correct for a trip count that
+  // fits in 32 bits, which an i32 count type guarantees (loops with a wider
+  // exit count are left alone).
+  HWLoopInfo.CountType = TM.isPPC64() && !ST->isXbox360ABI()
+                             ? Type::getInt64Ty(C)
+                             : Type::getInt32Ty(C);
   HWLoopInfo.LoopDecrement = ConstantInt::get(HWLoopInfo.CountType, 1);
   return true;
 }

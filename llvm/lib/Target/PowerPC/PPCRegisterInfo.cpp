@@ -1779,8 +1779,20 @@ PPCRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   }
 
   // Replace the FrameIndex with base register with GPR1 (SP) or GPR31 (FP).
-  MI.getOperand(FIOperandNum).ChangeToRegister(
-    FrameIndex < 0 ? getBaseRegister(MF) : getFrameRegister(MF), false);
+  Register FrameReg =
+      FrameIndex < 0 ? getBaseRegister(MF) : getFrameRegister(MF);
+  // ILP32 on PPC64 (Xbox 360): a frame address is an i32, so the instruction
+  // using it can be a 32-bit one (e.g. the ADDI that materializes it) whose
+  // operand takes a GPRC register. X1/X31/X30 and R1/R31/R30 are the same
+  // registers; name the one the operand's class expects.
+  if (!MI.isInlineAsm() && PPC::G8RCRegClass.contains(FrameReg)) {
+    const TargetRegisterClass *OpRC =
+        TII.getRegClass(MI.getDesc(), FIOperandNum);
+    Register Sub32 = getSubReg(FrameReg, PPC::sub_32);
+    if (OpRC && !OpRC->contains(FrameReg) && Sub32 && OpRC->contains(Sub32))
+      FrameReg = Sub32;
+  }
+  MI.getOperand(FIOperandNum).ChangeToRegister(FrameReg, false);
 
   // If the instruction is not present in ImmToIdxMap, then it has no immediate
   // form (and must be r+r).

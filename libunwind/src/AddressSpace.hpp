@@ -224,7 +224,12 @@ inline uintptr_t LocalAddressSpace::getP(pint_t addr) {
 }
 
 inline uint64_t LocalAddressSpace::getRegister(pint_t addr) {
-#if __SIZEOF_POINTER__ == 8 || defined(__mips64)
+// On powerpc64 the GPRs are 64-bit wide and CFI save slots are stored with
+// `std` (8 bytes), even under an ILP32 ABI where pointers are 32-bit (the
+// Xbox 360 powerpc64-unknown-xbox360 target). A pointer-width read there would
+// fetch only the high word of the slot -- which is zero for a zero-extended
+// 32-bit value -- so register restores must read the full doubleword.
+#if __SIZEOF_POINTER__ == 8 || defined(__mips64) || defined(__powerpc64__)
   return get64(addr);
 #else
   return get32(addr);
