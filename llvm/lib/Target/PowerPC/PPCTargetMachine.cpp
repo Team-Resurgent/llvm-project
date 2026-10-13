@@ -136,6 +136,7 @@ LLVMInitializePowerPCTarget() {
   initializePPCBranchCoalescingPass(PR);
   initializePPCBoolRetToIntPass(PR);
   initializePPCPreEmitPeepholePass(PR);
+  initializePPCXbox360ModeCheckPass(PR);
   initializePPCTLSDynamicCallPass(PR);
   initializePPCMIPeepholePass(PR);
   initializePPCLowerMASSVEntriesPass(PR);
@@ -559,6 +560,9 @@ void PPCPassConfig::addPreEmitPass2() {
   // possibility for other passes to break the requirements for forward
   // progress in the LL/SC block.
   addPass(createPPCExpandAtomicPseudoPass());
+  // Xbox 360: reject code the console would execute differently (32-bit
+  // computation mode, missing VMX integer multiplies). A no-op elsewhere.
+  addPass(createPPCXbox360ModeCheckPass());
   // Must run branch selection immediately preceding the asm printer.
   addPass(createPPCBranchSelectionPass());
 }

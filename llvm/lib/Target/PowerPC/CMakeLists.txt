@@ -56,6 +56,7 @@ add_llvm_target(PowerPCCodeGen
   PPCVSXFMAMutate.cpp
   PPCVSXSwapRemoval.cpp
   PPCPreEmitPeephole.cpp
+  PPCXbox360ModeCheck.cpp
   PPCLowerMASSVEntries.cpp
   PPCGenScalarMASSEntries.cpp
   GISel/PPCCallLowering.cpp

@@ -69,6 +69,7 @@
 ; CHECK-NEXT:       Machine Optimization Remark Emitter
 ; CHECK-NEXT:       Stack Frame Layout Analysis
 ; CHECK-NEXT:       PowerPC Expand Atomic
+; CHECK-NEXT:       PowerPC Xbox 360 execution-mode check
 ; CHECK-NEXT:       PowerPC Branch Selector
 ; CHECK-NEXT:       Lazy Machine Block Frequency Analysis
 ; CHECK-NEXT:       Machine Optimization Remark Emitter

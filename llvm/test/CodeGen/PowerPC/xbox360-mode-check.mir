@@ -1,0 +1,124 @@
+# RUN: not llc -mtriple=powerpc64-unknown-xbox360 -run-pass=ppc-xbox360-mode-check \
+# RUN:   -o /dev/null %s 2>&1 | FileCheck %s
+
+# Xbox 360 titles run in the 32-bit computation mode, so the Xbox 360
+# execution-mode check rejects a read of a 64-bit add/subtract's carry and a
+# 64-bit record form whose CR0 is used where the low word does not decide the
+# comparison. sradi's carry, 32-bit carries, andi., an EQ test of a
+# zero-extended word, any test of a value below 2^31, and record forms whose
+# CR0 is dead are fine.
+
+# CHECK: error: {{.*}}in function carry64{{.*}}Xbox 360: ADDE8: reads the carry of a 64-bit ADDC8
+# CHECK: error: {{.*}}in function record64{{.*}}Xbox 360: ADD8_rec: a record form sets CR0 from the low 32 bits
+# CHECK: error: {{.*}}in function rldicl32_lt{{.*}}Xbox 360: RLDICL_rec: a record form sets CR0 from the low 32 bits
+# CHECK-NOT: error: {{.*}}in function {{(sradi_addze|carry32|andi_rec|record64_dead|rldicl32_eq|rldicl40_lt)}}
+
+---
+name:            carry64
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $x3, $x4, $x5, $x6
+    renamable $x4 = ADDC8 killed renamable $x4, killed renamable $x6, implicit-def $carry
+    renamable $x3 = ADDE8 killed renamable $x3, killed renamable $x5, implicit-def dead $carry, implicit $carry
+    BLR8 implicit $lr8, implicit $rm, implicit $x3, implicit $x4
+...
+---
+name:            sradi_addze
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $x3
+    renamable $x3 = SRADI killed renamable $x3, 2, implicit-def $carry
+    renamable $x3 = ADDZE8 killed renamable $x3, implicit-def dead $carry, implicit $carry
+    BLR8 implicit $lr8, implicit $rm, implicit $x3
+...
+---
+name:            carry32
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $r3, $r4, $r5, $r6
+    renamable $r4 = ADDC killed renamable $r4, killed renamable $r6, implicit-def $carry
+    renamable $r3 = ADDE killed renamable $r3, killed renamable $r5, implicit-def dead $carry, implicit $carry
+    BLR implicit $lr, implicit $rm, implicit $r3, implicit $r4
+...
+---
+name:            record64
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $x3, $x4
+    renamable $x3 = ADD8_rec killed renamable $x3, killed renamable $x4, implicit-def $cr0
+    BCC 12, killed $cr0, %bb.2
+  bb.1:
+    BLR8 implicit $lr8, implicit $rm
+  bb.2:
+    BLR8 implicit $lr8, implicit $rm
+...
+---
+name:            andi_rec
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $x3
+    renamable $x3 = ANDI8_rec killed renamable $x3, 255, implicit-def $cr0
+    BCC 12, killed $cr0, %bb.2
+  bb.1:
+    BLR8 implicit $lr8, implicit $rm
+  bb.2:
+    BLR8 implicit $lr8, implicit $rm
+...
+---
+name:            record64_dead
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    liveins: $x3, $x4
+    renamable $x3 = ADD8_rec killed renamable $x3, killed renamable $x4, implicit-def dead $cr0
+    BLR8 implicit $lr8, implicit $rm, implicit $x3
+...
+---
+name:            rldicl32_eq
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $x4
+    dead renamable $x3 = RLDICL_rec renamable $x4, 32, 32, implicit-def $cr0
+    BCC 76, killed $cr0, %bb.2
+  bb.1:
+    BLR8 implicit $lr8, implicit $rm
+  bb.2:
+    BLR8 implicit $lr8, implicit $rm
+...
+---
+name:            rldicl32_lt
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $x4
+    dead renamable $x3 = RLDICL_rec renamable $x4, 32, 32, implicit-def $cr0
+    BCC 12, killed $cr0, %bb.2
+  bb.1:
+    BLR8 implicit $lr8, implicit $rm
+  bb.2:
+    BLR8 implicit $lr8, implicit $rm
+...
+---
+name:            rldicl40_lt
+tracksRegLiveness: true
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2
+    liveins: $x4
+    dead renamable $x3 = RLDICL_rec renamable $x4, 24, 40, implicit-def $cr0
+    BCC 12, killed $cr0, %bb.2
+  bb.1:
+    BLR8 implicit $lr8, implicit $rm
+  bb.2:
+    BLR8 implicit $lr8, implicit $rm
+...
