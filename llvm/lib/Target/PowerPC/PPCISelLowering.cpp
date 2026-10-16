@@ -13379,6 +13379,39 @@ Instruction *PPCTargetLowering::emitTrailingFence(IRBuilderBase &Builder,
   return nullptr;
 }
 
+// Xbox 360: the Xenon CPU has bugs in its reservation (lwarx/ldarx ...
+// stwcx./stdcx.) implementation, and the XDK forbids titles from using these
+// instructions except in the form its compiler emits for the Interlocked
+// intrinsics, which runs each reservation with external interrupts disabled:
+//
+//   mfmsr  rT          ; save the MSR
+//   mtmsrd r13, 1      ; L=1 sets only MSR[EE] and MSR[RI], from r13 (the
+//   l[wd]arx ...       ;   processor control region pointer, which has both
+//   ...                ;   bits clear): interrupts off
+//   st[wd]cx. ...
+//   mtmsrd rT, 1       ; restore
+//
+// Every exit from a reservation goes through a st[wd]cx. (a failed compare
+// stores the loaded value back) followed by the restore. The kernel loader
+// reports any other lwarx/stwcx. as an "improper instruction sequence". The
+// pre-emit PPCXbox360ModeCheck pass verifies the result.
+static Register emitXbox360ReservationEnter(MachineBasicBlock *BB,
+                                            const DebugLoc &dl,
+                                            const TargetInstrInfo *TII,
+                                            MachineRegisterInfo &RegInfo) {
+  Register Msr = RegInfo.createVirtualRegister(&PPC::GPRCRegClass);
+  BuildMI(BB, dl, TII->get(PPC::MFMSR), Msr);
+  BuildMI(BB, dl, TII->get(PPC::MTMSRD)).addReg(PPC::R13).addImm(1);
+  return Msr;
+}
+
+static void emitXbox360ReservationLeave(MachineBasicBlock *BB,
+                                        const DebugLoc &dl,
+                                        const TargetInstrInfo *TII,
+                                        Register Msr) {
+  BuildMI(BB, dl, TII->get(PPC::MTMSRD)).addReg(Msr).addImm(1);
+}
+
 MachineBasicBlock *PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI,
                                                        MachineBasicBlock *BB,
                                                        unsigned BinOpcode,
@@ -13428,13 +13461,20 @@ MachineBasicBlock *PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI,
   Register incr = MI.getOperand(4).getReg();
   DebugLoc dl = MI.getDebugLoc();
 
+  const bool Xbox360 = Subtarget.isXbox360ABI();
   MachineBasicBlock *loopMBB = F->CreateMachineBasicBlock(LLVM_BB);
   MachineBasicBlock *loop2MBB =
     CmpOpcode ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
+  // Xbox 360: a min/max that leaves without storing clears the reservation
+  // and restores the MSR here (see emitXbox360ReservationEnter).
+  MachineBasicBlock *clearMBB =
+    CmpOpcode && Xbox360 ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
   MachineBasicBlock *exitMBB = F->CreateMachineBasicBlock(LLVM_BB);
   F->insert(It, loopMBB);
   if (CmpOpcode)
     F->insert(It, loop2MBB);
+  if (clearMBB)
+    F->insert(It, clearMBB);
   F->insert(It, exitMBB);
   exitMBB->splice(exitMBB->begin(), BB,
                   std::next(MachineBasicBlock::iterator(MI)), BB->end());
@@ -13468,6 +13508,9 @@ MachineBasicBlock *PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI,
   //   fallthrough --> exitMBB
 
   BB = loopMBB;
+  Register Msr;
+  if (Xbox360)
+    Msr = emitXbox360ReservationEnter(BB, dl, TII, RegInfo);
   BuildMI(BB, dl, TII->get(LoadMnemonic), dest)
     .addReg(ptrA).addReg(ptrB);
   if (BinOpcode)
@@ -13483,22 +13526,38 @@ MachineBasicBlock *PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI,
     } else
       BuildMI(BB, dl, TII->get(CmpOpcode), CrReg).addReg(dest).addReg(incr);
 
+    MachineBasicBlock *NoStoreMBB = clearMBB ? clearMBB : exitMBB;
     BuildMI(BB, dl, TII->get(PPC::BCC))
         .addImm(CmpPred)
         .addReg(CrReg)
-        .addMBB(exitMBB);
+        .addMBB(NoStoreMBB);
     BB->addSuccessor(loop2MBB);
-    BB->addSuccessor(exitMBB);
+    BB->addSuccessor(NoStoreMBB);
     BB = loop2MBB;
   }
   BuildMI(BB, dl, TII->get(StoreMnemonic))
     .addReg(TmpReg).addReg(ptrA).addReg(ptrB);
+  if (Xbox360)
+    emitXbox360ReservationLeave(BB, dl, TII, Msr);
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE_MINUS)
       .addReg(PPC::CR0)
       .addMBB(loopMBB);
   BB->addSuccessor(loopMBB);
-  BB->addSuccessor(exitMBB);
+  if (clearMBB) {
+    // loop2MBB ends in a conditional branch back; it must not fall into the
+    // clear block, so branch to the exit explicitly.
+    BuildMI(BB, dl, TII->get(PPC::B)).addMBB(exitMBB);
+    BB->addSuccessor(exitMBB);
+    //  clearMBB: st[wd]cx. dest, ptr   (store the loaded value back)
+    //            mtmsrd    msr, 1
+    BuildMI(clearMBB, dl, TII->get(StoreMnemonic))
+        .addReg(dest).addReg(ptrA).addReg(ptrB);
+    emitXbox360ReservationLeave(clearMBB, dl, TII, Msr);
+    clearMBB->addSuccessor(exitMBB);
+  } else {
+    BB->addSuccessor(exitMBB);
+  }
 
   //  exitMBB:
   //   ...
@@ -13618,13 +13677,20 @@ MachineBasicBlock *PPCTargetLowering::EmitPartwordAtomicBinary(
   Register ptrA = MI.getOperand(1).getReg();
   Register ptrB = MI.getOperand(2).getReg();
 
+  const bool Xbox360 = Subtarget.isXbox360ABI();
   MachineBasicBlock *loopMBB = F->CreateMachineBasicBlock(LLVM_BB);
   MachineBasicBlock *loop2MBB =
       CmpOpcode ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
+  // Xbox 360: a min/max that leaves without storing clears the reservation
+  // and restores the MSR here (see emitXbox360ReservationEnter).
+  MachineBasicBlock *clearMBB =
+      CmpOpcode && Xbox360 ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
   MachineBasicBlock *exitMBB = F->CreateMachineBasicBlock(LLVM_BB);
   F->insert(It, loopMBB);
   if (CmpOpcode)
     F->insert(It, loop2MBB);
+  if (clearMBB)
+    F->insert(It, clearMBB);
   F->insert(It, exitMBB);
   exitMBB->splice(exitMBB->begin(), BB,
                   std::next(MachineBasicBlock::iterator(MI)), BB->end());
@@ -13720,6 +13786,9 @@ MachineBasicBlock *PPCTargetLowering::EmitPartwordAtomicBinary(
       .addReg(ShiftReg);
 
   BB = loopMBB;
+  Register Msr;
+  if (Xbox360)
+    Msr = emitXbox360ReservationEnter(BB, dl, TII, RegInfo);
   BuildMI(BB, dl, TII->get(PPC::LWARX), TmpDestReg)
       .addReg(ZeroReg)
       .addReg(PtrReg);
@@ -13753,12 +13822,13 @@ MachineBasicBlock *PPCTargetLowering::EmitPartwordAtomicBinary(
       CmpReg = incr;
     }
     BuildMI(BB, dl, TII->get(CmpOpcode), CrReg).addReg(ValueReg).addReg(CmpReg);
+    MachineBasicBlock *NoStoreMBB = clearMBB ? clearMBB : exitMBB;
     BuildMI(BB, dl, TII->get(PPC::BCC))
         .addImm(CmpPred)
         .addReg(CrReg)
-        .addMBB(exitMBB);
+        .addMBB(NoStoreMBB);
     BB->addSuccessor(loop2MBB);
-    BB->addSuccessor(exitMBB);
+    BB->addSuccessor(NoStoreMBB);
     BB = loop2MBB;
   }
   BuildMI(BB, dl, TII->get(PPC::OR), Tmp4Reg).addReg(Tmp3Reg).addReg(Tmp2Reg);
@@ -13766,12 +13836,27 @@ MachineBasicBlock *PPCTargetLowering::EmitPartwordAtomicBinary(
       .addReg(Tmp4Reg)
       .addReg(ZeroReg)
       .addReg(PtrReg);
+  if (Xbox360)
+    emitXbox360ReservationLeave(BB, dl, TII, Msr);
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE_MINUS)
       .addReg(PPC::CR0)
       .addMBB(loopMBB);
   BB->addSuccessor(loopMBB);
-  BB->addSuccessor(exitMBB);
+  if (clearMBB) {
+    BuildMI(BB, dl, TII->get(PPC::B)).addMBB(exitMBB);
+    BB->addSuccessor(exitMBB);
+    //  clearMBB: stwcx. word, ptr   (store the loaded word back)
+    //            mtmsrd msr, 1
+    BuildMI(clearMBB, dl, TII->get(PPC::STWCX))
+        .addReg(TmpDestReg)
+        .addReg(ZeroReg)
+        .addReg(PtrReg);
+    emitXbox360ReservationLeave(clearMBB, dl, TII, Msr);
+    clearMBB->addSuccessor(exitMBB);
+  } else {
+    BB->addSuccessor(exitMBB);
+  }
 
   //  exitMBB:
   //   ...
@@ -14441,11 +14526,24 @@ emitAtomicCmpSwapHardware(MachineInstr &MI, MachineBasicBlock *BB,
 
   Register CrReg = RegInfo.createVirtualRegister(&PPC::CRRCRegClass);
 
+  // Xbox 360: a failed compare clears the reservation and restores the MSR
+  // in its own block (see emitXbox360ReservationEnter).
+  const bool Xbox360 = Subtarget.isXbox360ABI();
+  MachineBasicBlock *clearMBB = nullptr;
+  if (Xbox360) {
+    clearMBB = F->CreateMachineBasicBlock(BB->getBasicBlock());
+    F->insert(exitMBB->getIterator(), clearMBB);
+  }
+  MachineBasicBlock *FailMBB = clearMBB ? clearMBB : exitMBB;
+
   // loop1MBB:
   //   l[bhwd]arx dest, ptr
   //   cmp[wd] dest, oldval
   //   bne- exitBB
   BB = loop1MBB;
+  Register Msr;
+  if (Xbox360)
+    Msr = emitXbox360ReservationEnter(BB, dl, TII, RegInfo);
   BuildMI(BB, dl, TII->get(LoadMnemonic), dest).addReg(ptrA).addReg(ptrB);
   BuildMI(BB, dl, TII->get(is64bit ? PPC::CMPD : PPC::CMPW), CrReg)
       .addReg(dest)
@@ -14453,9 +14551,9 @@ emitAtomicCmpSwapHardware(MachineInstr &MI, MachineBasicBlock *BB,
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE_MINUS)
       .addReg(CrReg)
-      .addMBB(exitMBB);
+      .addMBB(FailMBB);
   BB->addSuccessor(loop2MBB);
-  BB->addSuccessor(exitMBB);
+  BB->addSuccessor(FailMBB);
 
   // loop2MBB:
   //   st[bhwd]cx. newval, ptr
@@ -14466,6 +14564,8 @@ emitAtomicCmpSwapHardware(MachineInstr &MI, MachineBasicBlock *BB,
       .addReg(newval)
       .addReg(ptrA)
       .addReg(ptrB);
+  if (Xbox360)
+    emitXbox360ReservationLeave(BB, dl, TII, Msr);
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE_MINUS)
       .addReg(PPC::CR0)
@@ -14473,6 +14573,18 @@ emitAtomicCmpSwapHardware(MachineInstr &MI, MachineBasicBlock *BB,
   BuildMI(BB, dl, TII->get(PPC::B)).addMBB(exitMBB);
   BB->addSuccessor(loop1MBB);
   BB->addSuccessor(exitMBB);
+
+  if (clearMBB) {
+    // clearMBB:
+    //   st[bhwd]cx. dest, ptr   (store the loaded value back)
+    //   mtmsrd msr, 1
+    BuildMI(clearMBB, dl, TII->get(StoreMnemonic))
+        .addReg(dest)
+        .addReg(ptrA)
+        .addReg(ptrB);
+    emitXbox360ReservationLeave(clearMBB, dl, TII, Msr);
+    clearMBB->addSuccessor(exitMBB);
+  }
 
   return exitMBB;
 }
@@ -14618,7 +14730,20 @@ emitAtomicCmpSwapSoftware(MachineInstr &MI, MachineBasicBlock *BB,
   //   and tmp, tmpDest, mask
   //   cmpw tmp, oldval3
   //   bne- exitBB
+  // Xbox 360: a failed compare clears the reservation and restores the MSR
+  // in its own block (see emitXbox360ReservationEnter).
+  const bool Xbox360 = Subtarget.isXbox360ABI();
+  MachineBasicBlock *clearMBB = nullptr;
+  if (Xbox360) {
+    clearMBB = F->CreateMachineBasicBlock(BB->getBasicBlock());
+    F->insert(exitMBB->getIterator(), clearMBB);
+  }
+  MachineBasicBlock *FailMBB = clearMBB ? clearMBB : exitMBB;
+
   BB = loop1MBB;
+  Register Msr;
+  if (Xbox360)
+    Msr = emitXbox360ReservationEnter(BB, dl, TII, RegInfo);
   BuildMI(BB, dl, TII->get(PPC::LWARX), TmpDestReg)
       .addReg(ZeroReg)
       .addReg(PtrReg);
@@ -14629,9 +14754,9 @@ emitAtomicCmpSwapSoftware(MachineInstr &MI, MachineBasicBlock *BB,
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE)
       .addReg(CrReg)
-      .addMBB(exitMBB);
+      .addMBB(FailMBB);
   BB->addSuccessor(loop2MBB);
-  BB->addSuccessor(exitMBB);
+  BB->addSuccessor(FailMBB);
 
   // loop2MBB:
   //   andc tmp2, tmpDest, mask
@@ -14650,6 +14775,8 @@ emitAtomicCmpSwapSoftware(MachineInstr &MI, MachineBasicBlock *BB,
       .addReg(Tmp4Reg)
       .addReg(ZeroReg)
       .addReg(PtrReg);
+  if (Xbox360)
+    emitXbox360ReservationLeave(BB, dl, TII, Msr);
   BuildMI(BB, dl, TII->get(PPC::BCC))
       .addImm(PPC::PRED_NE)
       .addReg(PPC::CR0)
@@ -14657,6 +14784,18 @@ emitAtomicCmpSwapSoftware(MachineInstr &MI, MachineBasicBlock *BB,
   BuildMI(BB, dl, TII->get(PPC::B)).addMBB(exitMBB);
   BB->addSuccessor(loop1MBB);
   BB->addSuccessor(exitMBB);
+
+  if (clearMBB) {
+    // clearMBB:
+    //   stwcx. tmpDest, ptr   (store the loaded word back)
+    //   mtmsrd msr, 1
+    BuildMI(clearMBB, dl, TII->get(PPC::STWCX))
+        .addReg(TmpDestReg)
+        .addReg(ZeroReg)
+        .addReg(PtrReg);
+    emitXbox360ReservationLeave(clearMBB, dl, TII, Msr);
+    clearMBB->addSuccessor(exitMBB);
+  }
 
   // exitMBB:
   //   srw dest, tmpDest, shift
@@ -21172,6 +21311,10 @@ PPCTargetLowering::shouldExpandAtomicCmpXchgInIR(
   unsigned Size = AI->getNewValOperand()->getType()->getPrimitiveSizeInBits();
   if (shouldInlineQuadwordAtomics() && Size == 128)
     return AtomicExpansionKind::MaskedIntrinsic;
+  // Xbox 360: the ATOMIC_CMP_SWAP_* pseudos emit the protected reservation
+  // sequence (emitXbox360ReservationEnter); the IR LL/SC expansion does not.
+  if (Subtarget.isXbox360ABI())
+    return AtomicExpansionKind::None;
   return AtomicExpansionKind::LLSC;
 }
 

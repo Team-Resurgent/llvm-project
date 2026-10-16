@@ -26,7 +26,13 @@
 //     its result determines the comparison: always for a result that is
 //     sign-extended from its low word or below 2^31 (andi., extsw., cntlzd.,
 //     rldicl. clearing at least 33 high bits, ...), and for EQ/NE when its
-//     high word is zero (rldicl. clearing exactly 32, andis., ...).
+//     high word is zero (rldicl. clearing exactly 32, andis., ...);
+//   - a reservation without Xenon's interrupt protection: every l[bhwd]arx
+//     must directly follow mtmsrd r13, 1, and every st[bhwd]cx. must be
+//     directly followed by mtmsrd rT, 1, as the XDK compiler emits them for
+//     the Interlocked intrinsics. The kernel loader reports any other
+//     lwarx/stwcx. as an improper instruction sequence (the CPU has bugs in
+//     its reservation implementation that this works around).
 //
 //===----------------------------------------------------------------------===//
 
@@ -183,6 +189,44 @@ static bool cr0UsesAreEqOnly(const MachineInstr &MI,
   return true;
 }
 
+static bool isLoadReserve(unsigned Opc) {
+  switch (Opc) {
+  case PPC::LWARX: case PPC::LWARXL: case PPC::LDARX: case PPC::LDARXL:
+  case PPC::LBARX: case PPC::LBARXL: case PPC::LHARX: case PPC::LHARXL:
+  case PPC::LQARX: case PPC::LQARXL:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isStoreConditional(unsigned Opc) {
+  switch (Opc) {
+  case PPC::STWCX: case PPC::STDCX: case PPC::STBCX: case PPC::STHCX:
+  case PPC::STQCX:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// An inline-asm string that names a load-reserve or store-conditional.
+static bool mentionsReservation(StringRef Asm) {
+  for (StringRef M : {"lwarx", "ldarx", "lbarx", "lharx", "lqarx", "stwcx",
+                      "stdcx", "stbcx", "sthcx", "stqcx"})
+    if (Asm.contains_insensitive(M))
+      return true;
+  return false;
+}
+
+// mtmsrd <Reg>, 1 (any register when Reg is 0).
+static bool isMtmsrdL1(const MachineInstr *MI, Register Reg) {
+  return MI && MI->getOpcode() == PPC::MTMSRD && MI->getOperand(1).isImm() &&
+         MI->getOperand(1).getImm() == 1 &&
+         (!Reg || (MI->getOperand(0).isReg() &&
+                   MI->getOperand(0).getReg() == Reg));
+}
+
 static void report(MachineFunction &MF, const MachineInstr &MI,
                    const PPCInstrInfo &TII, const Twine &Why) {
   MF.getFunction().getContext().diagnose(DiagnosticInfoUnsupported(
@@ -200,11 +244,37 @@ bool PPCXbox360ModeCheck::runOnMachineFunction(MachineFunction &MF) {
   const MachineRegisterInfo &MRI = MF.getRegInfo();
 
   for (MachineBasicBlock &MBB : MF) {
-    // Forward: the instructions that define CA, and the reads of it.
+    // Forward: the instructions that define CA, and the reads of it; and the
+    // interrupt protection around every reservation.
     const MachineInstr *CADef = nullptr;
+    const MachineInstr *Prev = nullptr;
+    bool NeedRestore = false;
     for (const MachineInstr &MI : MBB) {
       if (MI.isDebugInstr())
         continue;
+      if (NeedRestore && !isMtmsrdL1(&MI, Register()))
+        report(MF, *Prev, TII,
+               "a store-conditional not followed by mtmsrd rT, 1 (the Xenon "
+               "reservation protection); the kernel loader reports it as an "
+               "improper instruction sequence");
+      NeedRestore = isStoreConditional(MI.getOpcode());
+      if (isLoadReserve(MI.getOpcode()) && !isMtmsrdL1(Prev, PPC::R13))
+        report(MF, MI, TII,
+               "a load-reserve not preceded by mtmsrd r13, 1 (the Xenon "
+               "reservation protection); the kernel loader reports it as an "
+               "improper instruction sequence -- use atomics or the "
+               "Interlocked functions");
+      // Inline assembly (including __builtin_ppc_lwarx, which clang emits as
+      // inline asm) cannot be given the protection; the XDK forbids titles
+      // from using these instructions directly.
+      if (MI.isInlineAsm() && MI.getOperand(0).isSymbol() &&
+          mentionsReservation(MI.getOperand(0).getSymbolName()))
+        report(MF, MI, TII,
+               "inline assembly uses lwarx/ldarx/stwcx./stdcx., which Xbox 360 "
+               "titles must not use directly (the kernel loader reports an "
+               "improper instruction sequence) -- use atomics or the "
+               "Interlocked functions");
+      Prev = &MI;
       if (isXenonMissingVMX(MI.getOpcode()))
         report(MF, MI, TII, "Xenon does not implement this VMX instruction");
       if (CADef && MI.readsRegister(PPC::CARRY, &TRI) &&
@@ -216,6 +286,10 @@ bool PPCXbox360ModeCheck::runOnMachineFunction(MachineFunction &MF) {
       if (MI.modifiesRegister(PPC::CARRY, &TRI))
         CADef = &MI;
     }
+    if (NeedRestore)
+      report(MF, *Prev, TII,
+             "a store-conditional ends its block without mtmsrd rT, 1 (the "
+             "Xenon reservation protection)");
 
     // Backward: 64-bit record forms whose CR0 is live afterwards.
     LivePhysRegs Live(TRI);
