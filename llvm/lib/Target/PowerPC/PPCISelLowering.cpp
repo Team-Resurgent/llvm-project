@@ -19832,7 +19832,8 @@ bool PPCTargetLowering::isLegalAddImmediate(int64_t Imm) const {
   return isInt<16>(Imm) || isUInt<16>(Imm);
 }
 
-bool PPCTargetLowering::allowsMisalignedMemoryAccesses(EVT VT, unsigned, Align,
+bool PPCTargetLowering::allowsMisalignedMemoryAccesses(EVT VT, unsigned,
+                                                       Align Alignment,
                                                        MachineMemOperand::Flags,
                                                        unsigned *Fast) const {
   if (DisablePPCUnaligned)
@@ -19846,6 +19847,21 @@ bool PPCTargetLowering::allowsMisalignedMemoryAccesses(EVT VT, unsigned, Align,
 
   if (!VT.isSimple())
     return false;
+
+  // The Xenon (Xbox 360) raises a fatal alignment interrupt
+  // (STATUS_DATATYPE_MISALIGNMENT) on a misaligned doubleword integer access --
+  // the ld/std/ldx/stdx the backend emits for an i64 require 8-byte alignment,
+  // unlike generic PowerPC64 where the kernel emulates the misalignment. (Word
+  // and smaller integer accesses are handled in hardware; vector lvx/stvx
+  // truncate the address, so neither faults.) Report an under-aligned >=64-bit
+  // scalar as inaccessible so the store merger / vectorizer does not widen two
+  // aligned 32-bit accesses into one misaligned 64-bit access.
+  if (Subtarget.isXbox360ABI() && !VT.isVector() &&
+      VT.getSizeInBits() > 32 && Alignment < Align(8)) {
+    if (Fast)
+      *Fast = 0;
+    return false;
+  }
 
   if (VT.isFloatingPoint() && !VT.isVector() &&
       !Subtarget.allowsUnalignedFPAccess())
