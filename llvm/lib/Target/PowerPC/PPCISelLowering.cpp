@@ -19849,18 +19849,25 @@ bool PPCTargetLowering::allowsMisalignedMemoryAccesses(EVT VT, unsigned,
     return false;
 
   // The Xenon (Xbox 360) raises a fatal alignment interrupt
-  // (STATUS_DATATYPE_MISALIGNMENT) on a misaligned doubleword integer access --
-  // the ld/std/ldx/stdx the backend emits for an i64 require 8-byte alignment,
-  // unlike generic PowerPC64 where the kernel emulates the misalignment. (Word
-  // and smaller integer accesses are handled in hardware; vector lvx/stvx
-  // truncate the address, so neither faults.) Report an under-aligned >=64-bit
-  // scalar as inaccessible so the store merger / vectorizer does not widen two
-  // aligned 32-bit accesses into one misaligned 64-bit access.
-  if (Subtarget.isXbox360ABI() && !VT.isVector() &&
-      VT.getSizeInBits() > 32 && Alignment < Align(8)) {
-    if (Fast)
-      *Fast = 0;
-    return false;
+  // (STATUS_DATATYPE_MISALIGNMENT) on:
+  //   * a misaligned doubleword INTEGER access -- the ld/std/ldx/stdx the backend
+  //     emits for an i64 require 8-byte alignment (word and smaller integer
+  //     accesses are handled in hardware);
+  //   * ANY misaligned FLOATING-POINT access -- the FPU has no misaligned lfs/lfd,
+  //     so an f32 needs 4-byte and an f64 needs 8-byte alignment. (e.g. XMLoadFloat3
+  //     reading an XMFLOAT3 straight out of a packed vertex buffer.)
+  // Generic PowerPC64 emulates both in the kernel; the Xenon does not. Vector
+  // lvx/stvx truncate the address and never fault. Report an under-aligned access
+  // of these kinds as inaccessible so the legalizer expands it into aligned pieces
+  // and the store-merger/vectorizer does not form one.
+  if (Subtarget.isXbox360ABI() && !VT.isVector()) {
+    unsigned NeedAlign = VT.isFloatingPoint() ? VT.getStoreSize()
+                                              : (VT.getSizeInBits() > 32 ? 8 : 1);
+    if (NeedAlign > 1 && Alignment < Align(NeedAlign)) {
+      if (Fast)
+        *Fast = 0;
+      return false;
+    }
   }
 
   if (VT.isFloatingPoint() && !VT.isVector() &&
