@@ -828,9 +828,21 @@ CharUnits PPC64_SVR4_ABIInfo::getParamTypeAlignment(QualType Ty) const {
 }
 
 bool PPC64_SVR4_ABIInfo::isHomogeneousAggregateBaseType(QualType Ty) const {
+  // The Xbox 360 (Xenon) target uses the ELFv2 ABI kind, but Microsoft's XDK
+  // compiler does NOT apply the ELFv2 homogeneous-floating-point-aggregate
+  // rule: a by-value struct of only floats/doubles is passed in general
+  // purpose registers like any other small aggregate, not in the FPRs.  Since
+  // clang titles link against precompiled MSVC XDK/kernel libraries, we must
+  // match that convention, so float-based homogeneous aggregates are not
+  // recognized here for Xbox 360.  (A homogeneous aggregate of 128-bit vectors
+  // is still handled below; a bare __vector4 is a vector type, not an
+  // aggregate, and reaches the dedicated vector path in classify*Type.)
+  bool IsXbox360 = getTarget().getTriple().getOS() == llvm::Triple::Xbox360;
   // Homogeneous aggregates for ELFv2 must have base types of float,
   // double, long double, or 128-bit vectors.
   if (const BuiltinType *BT = Ty->getAs<BuiltinType>()) {
+    if (IsXbox360)
+      return false;
     if (BT->getKind() == BuiltinType::Float ||
         BT->getKind() == BuiltinType::Double ||
         BT->getKind() == BuiltinType::LongDouble ||
