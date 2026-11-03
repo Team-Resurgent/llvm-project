@@ -452,6 +452,21 @@ public:
   virtual void addExtraOpts(llvm::opt::ArgStringList &CmdArgs) const {}
 };
 
+/// Xbox360ToolChain - The Microsoft Xbox 360 (Xenon) bare-metal target. It is
+/// an ELF ppc64 (ILP32-on-ppc64, ELFv2) target otherwise handled like
+/// Generic_ELF; the only difference is that its libc, like the XDK/MSVC
+/// compiler, does not set errno from the math functions, so math-errno is off
+/// by default. That lets __builtin_fmaf and the other math builtins lower to
+/// the hardware instructions (e.g. fmadds) instead of libm calls.
+class LLVM_LIBRARY_VISIBILITY Xbox360ToolChain : public Generic_ELF {
+public:
+  Xbox360ToolChain(const Driver &D, const llvm::Triple &Triple,
+                   const llvm::opt::ArgList &Args)
+      : Generic_ELF(D, Triple, Args) {}
+
+  bool IsMathErrnoDefault() const override { return false; }
+};
+
 } // end namespace toolchains
 } // end namespace driver
 } // end namespace clang

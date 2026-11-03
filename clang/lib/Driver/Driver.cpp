@@ -6300,6 +6300,9 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
         break;
       }
       break;
+    case llvm::Triple::Xbox360:
+      TC = std::make_unique<toolchains::Xbox360ToolChain>(*this, Target, Args);
+      break;
     case llvm::Triple::PS4:
       TC = std::make_unique<toolchains::PS4CPU>(*this, Target, Args);
       break;
