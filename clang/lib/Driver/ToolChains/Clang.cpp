@@ -1218,7 +1218,9 @@ static bool isSignedCharDefault(const llvm::Triple &Triple) {
 
   case llvm::Triple::ppc:
   case llvm::Triple::ppc64:
-    if (Triple.isOSDarwin())
+    // The Xbox 360 (Xenon) XDK/MSVC compiler makes plain char signed, and the
+    // XDK headers/code rely on it (e.g. CHAR is char, sign-extended on widen).
+    if (Triple.isOSDarwin() || Triple.getOS() == llvm::Triple::Xbox360)
       return true;
     return false;
 
