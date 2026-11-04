@@ -38,6 +38,16 @@
 using namespace clang;
 using namespace CodeGen;
 
+// A record whose bit-fields were declared under #pragma bitfield_order(lsb_to_msb)
+// (marked with LSBFirstBitfieldAttr) is laid out least-significant-bit first
+// even on a big-endian target; otherwise the target default applies.
+static bool recordUsesLSBFirstBitfields(const RecordDecl *RD,
+                                        const TargetInfo &TI) {
+  if (RD && RD->hasAttr<LSBFirstBitfieldAttr>())
+    return true;
+  return TI.useLSBFirstBitfields();
+}
+
 //===----------------------------------------------------------------------===//
 //                            ConstantAggregateBuilder
 //===----------------------------------------------------------------------===//
@@ -128,7 +138,8 @@ public:
   bool add(llvm::Constant *C, CharUnits Offset, bool AllowOverwrite);
 
   /// Update or overwrite the bits starting at \p OffsetInBits with \p Bits.
-  bool addBits(llvm::APInt Bits, uint64_t OffsetInBits, bool AllowOverwrite);
+  bool addBits(llvm::APInt Bits, uint64_t OffsetInBits, bool AllowOverwrite,
+               bool BitfieldBE);
 
   /// Attempt to condense the value starting at \p Offset to a constant of type
   /// \p DesiredTy.
@@ -191,16 +202,15 @@ bool ConstantAggregateBuilder::add(llvm::Constant *C, CharUnits Offset,
 }
 
 bool ConstantAggregateBuilder::addBits(llvm::APInt Bits, uint64_t OffsetInBits,
-                              bool AllowOverwrite) {
+                              bool AllowOverwrite, bool BitfieldBE) {
   const ASTContext &Context = CGM.getContext();
   const uint64_t CharWidth = CGM.getContext().getCharWidth();
 
   // Bit-fields are laid out most-significant-bit first on big-endian targets,
-  // except when the target allocates them least-significant-bit first even
-  // when big-endian (the MS Xbox 360 convention), in which case they are
-  // placed like little-endian.
-  const bool BitfieldBE = CGM.getDataLayout().isBigEndian() &&
-                          !Context.getTargetInfo().useLSBFirstBitfields();
+  // except when the record allocates them least-significant-bit first (the MS
+  // Xbox 360 convention / #pragma bitfield_order(lsb_to_msb)), in which case
+  // they are placed like little-endian. The caller has made that decision --
+  // it has the record context -- and passes the result in BitfieldBE.
 
   // Offset of where we want the first bit to go within the bits of the
   // current char.
@@ -668,6 +678,11 @@ bool ConstStructBuilder::AppendBitField(const FieldDecl *Field,
   if (Info.Size < FieldValue.getBitWidth())
     FieldValue = FieldValue.trunc(Info.Size);
 
+  // Does this field's record lay bit-fields out least-significant-bit first
+  // (the MS Xbox 360 convention / #pragma bitfield_order(lsb_to_msb))?
+  const bool RecordLSB = recordUsesLSBFirstBitfields(
+      Field->getParent(), CGM.getContext().getTargetInfo());
+
   // On a big-endian target that allocates bit-fields least-significant-bit
   // first (the MS Xbox 360 convention), a bit-field occupies bits
   // [Info.Offset, Info.Offset + Info.Size) counted from the least-significant
@@ -683,8 +698,7 @@ bool ConstStructBuilder::AppendBitField(const FieldDecl *Field,
   // down in front of an earlier field's. Distinct bit-fields never share bits
   // (partial bytes are merged, keeping the other fields' bits), so that
   // padding is all there is to overwrite.
-  if (CGM.getDataLayout().isBigEndian() &&
-      CGM.getContext().getTargetInfo().useLSBFirstBitfields()) {
+  if (CGM.getDataLayout().isBigEndian() && RecordLSB) {
     const uint64_t CharWidth = CGM.getContext().getCharWidth();
     const uint64_t StorageStart =
         CGM.getContext().toBits(StartOffset) + FieldOffset - Info.Offset;
@@ -698,7 +712,7 @@ bool ConstStructBuilder::AppendBitField(const FieldDecl *Field,
       if (!Builder.addBits(Chunk,
                            StorageStart + MemChar * CharWidth +
                                (Lo - UnitChar * CharWidth),
-                           /*AllowOverwrite=*/true))
+                           /*AllowOverwrite=*/true, /*BitfieldBE=*/false))
         return false;
       Lo = Hi;
     }
@@ -707,7 +721,8 @@ bool ConstStructBuilder::AppendBitField(const FieldDecl *Field,
 
   return Builder.addBits(FieldValue,
                          CGM.getContext().toBits(StartOffset) + FieldOffset,
-                         AllowOverwrite);
+                         AllowOverwrite,
+                         CGM.getDataLayout().isBigEndian() && !RecordLSB);
 }
 
 static bool EmitDesignatedInitUpdater(ConstantEmitter &Emitter,
@@ -1048,7 +1063,8 @@ bool ConstStructBuilder::DoZeroInitPadding(
   // and fill the unit itself (AppendBitField then merges each field's bits
   // into it), and count the unit as covered.
   if (Field.isBitField() && CGM.getDataLayout().isBigEndian() &&
-      CGM.getContext().getTargetInfo().useLSBFirstBitfields()) {
+      recordUsesLSBFirstBitfields(Field.getParent(),
+                                  CGM.getContext().getTargetInfo())) {
     const CGRecordLayout &RL =
         CGM.getTypes().getCGRecordLayout(Field.getParent());
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(&Field);
@@ -2153,7 +2169,12 @@ llvm::Constant *ConstantEmitter::emitForMemory(CodeGenModule &CGM,
         // Long _BitInt has array of bytes as in-memory type.
         // So, split constant into individual bytes.
         llvm::APInt Value = cast<llvm::ConstantInt>(Res)->getValue();
-        Builder.addBits(Value, /*OffsetInBits=*/0, /*AllowOverwrite=*/false);
+        // Not a record bit-field (a split long _BitInt), so no per-record order
+        // applies: use the target default.
+        Builder.addBits(Value, /*OffsetInBits=*/0, /*AllowOverwrite=*/false,
+                        CGM.getDataLayout().isBigEndian() &&
+                            !CGM.getContext().getTargetInfo()
+                                 .useLSBFirstBitfields());
         return Builder.build(MemTy, /*AllowOversized*/ false);
       }
       return Res;

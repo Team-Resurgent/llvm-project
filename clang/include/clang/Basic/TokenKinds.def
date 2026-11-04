@@ -794,6 +794,11 @@ PRAGMA_ANNOTATION(pragma_dump)
 // handles them.
 PRAGMA_ANNOTATION(pragma_msstruct)
 
+// Annotation for #pragma bitfield_order...
+// The lexer produces these so that they only take effect when the parser
+// handles them.
+PRAGMA_ANNOTATION(pragma_bitfield_order)
+
 // Annotation for #pragma align...
 // The lexer produces these so that they only take effect when the parser
 // handles them.

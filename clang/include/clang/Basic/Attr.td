@@ -4486,6 +4486,15 @@ def GCCStruct : InheritableAttr {
   let Documentation = [MSStructDocs]; // Covers this attribute too.
 }
 
+// Applied implicitly to a record defined under #pragma bitfield_order(lsb_to_msb)
+// so its bit-fields are allocated least-significant-bit first even on a
+// big-endian target (the MS Xbox 360 convention). No source-level spelling.
+def LSBFirstBitfield : InheritableAttr {
+  let Spellings = [];
+  let Subjects = SubjectList<[Record]>;
+  let Documentation = [InternalOnly];
+}
+
 def DLLExport : InheritableAttr, TargetSpecificAttr<TargetHasDLLImportExport> {
   let Spellings = [Declspec<"dllexport">, GCC<"dllexport">];
   let Subjects = SubjectList<[Function, Var, CXXRecord, ObjCInterface]>;

@@ -748,6 +748,9 @@ Parser::ParseExternalDeclaration(ParsedAttributes &Attrs,
   case tok::annot_pragma_msstruct:
     HandlePragmaMSStruct();
     return nullptr;
+  case tok::annot_pragma_bitfield_order:
+    HandlePragmaBitfieldOrder();
+    return nullptr;
   case tok::annot_pragma_align:
     HandlePragmaAlign();
     return nullptr;

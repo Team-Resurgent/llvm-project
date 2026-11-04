@@ -31,6 +31,16 @@
 using namespace clang;
 using namespace CodeGen;
 
+// A record whose bit-fields were declared under #pragma bitfield_order(lsb_to_msb)
+// (marked with LSBFirstBitfieldAttr) is laid out least-significant-bit first
+// even on a big-endian target; otherwise the target default applies.
+static bool recordUsesLSBFirstBitfields(const RecordDecl *RD,
+                                        const TargetInfo &TI) {
+  if (RD && RD->hasAttr<LSBFirstBitfieldAttr>())
+    return true;
+  return TI.useLSBFirstBitfields();
+}
+
 namespace {
 /// The CGRecordLowering is responsible for lowering an ASTRecordLayout to an
 /// llvm::Type.  Some of the lowering is straightforward, some is not.  Here we
@@ -250,7 +260,7 @@ void CGRecordLowering::setBitFieldInfo(
   // Targets that allocate bit-fields least-significant-bit first even when
   // big-endian (the MS Xbox 360 convention) keep the LSB-first offset.
   if (DataLayout.isBigEndian() &&
-      !Context.getTargetInfo().useLSBFirstBitfields())
+      !recordUsesLSBFirstBitfields(D, Context.getTargetInfo()))
     Info.Offset = Info.StorageSize - (Info.Offset + Info.Size);
 
   Info.VolatileStorageSize = 0;
@@ -1074,7 +1084,8 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
   // Targets that allocate bit-fields least-significant-bit first even when
   // big-endian (the MS Xbox 360 convention) keep the LSB-first offset.
   if (Types.getDataLayout().isBigEndian() &&
-      !Types.getContext().getTargetInfo().useLSBFirstBitfields()) {
+      !recordUsesLSBFirstBitfields(FD ? FD->getParent() : nullptr,
+                                   Types.getContext().getTargetInfo())) {
     Offset = StorageSize - (Offset + Size);
   }
 
@@ -1190,7 +1201,7 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
       // Targets that keep bit-fields least-significant-bit first even when
       // big-endian (the MS Xbox 360 convention) start at the front like LE.
       if (getDataLayout().isBigEndian() &&
-          !getContext().getTargetInfo().useLSBFirstBitfields())
+          !recordUsesLSBFirstBitfields(D, getContext().getTargetInfo()))
         assert(static_cast<unsigned>(Info.Offset + Info.Size) ==
                Info.StorageSize &&
                "Big endian union bitfield does not end at the back");

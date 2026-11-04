@@ -26,6 +26,13 @@ enum PragmaMSStructKind {
   PMSST_ON   // #pragms ms_struct on
 };
 
+enum PragmaBitfieldOrderKind {
+  PBOK_LsbToMsb, // #pragma bitfield_order(lsb_to_msb)
+  PBOK_MsbToLsb, // #pragma bitfield_order(msb_to_lsb)
+  PBOK_Push,     // #pragma bitfield_order(push)
+  PBOK_Pop       // #pragma bitfield_order(pop)
+};
+
 enum PragmaFloatControlKind {
   PFC_Unknown,
   PFC_Precise,   // #pragma float_control(precise, [,on])

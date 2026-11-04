@@ -1833,6 +1833,13 @@ public:
 
   bool MSStructPragmaOn; // True when \#pragma ms_struct on
 
+  /// True when a \#pragma bitfield_order(lsb_to_msb) is currently in effect, so
+  /// records are laid out least-significant-bit first even on a big-endian
+  /// target. \#pragma bitfield_order(push|pop) saves/restores this onto
+  /// BitfieldOrderStack.
+  bool BitfieldOrderLSBFirst = false;
+  llvm::SmallVector<bool, 8> BitfieldOrderStack;
+
   /// Source location for newly created implicit MSInheritanceAttrs
   SourceLocation ImplicitMSInheritanceAttrLoc;
 
@@ -2230,6 +2237,11 @@ public:
 
   /// ActOnPragmaMSStruct - Called on well formed \#pragma ms_struct [on|off].
   void ActOnPragmaMSStruct(PragmaMSStructKind Kind);
+
+  /// ActOnPragmaBitfieldOrder - Called on well formed
+  /// \#pragma bitfield_order(lsb_to_msb|msb_to_lsb|push|pop).
+  void ActOnPragmaBitfieldOrder(PragmaBitfieldOrderKind Kind,
+                                SourceLocation PragmaLoc);
 
   /// ActOnPragmaMSComment - Called on well formed
   /// \#pragma comment(kind, "arg").

@@ -91,14 +91,13 @@ public:
     if (Triple.getOS() == llvm::Triple::Xbox360) {
       LongDoubleWidth = LongDoubleAlign = 64;
       LongDoubleFormat = &llvm::APFloat::IEEEdouble();
-      // The Xbox 360 (Xenon) MS compiler allocates bit-fields
-      // least-significant-bit first even though the target is big-endian, so
-      // bit-fields in structs shared with the MS-compiled system libraries and
-      // GPU hardware registers (e.g. GPUTEXTURE_FETCH_CONSTANT) match. clang's
-      // default big-endian most-significant-bit-first order reads/writes the
-      // wrong bits. This applies to whichever PPC frontend target is selected
-      // for the xbox360 OS (the ABI itself comes from the PowerPC backend).
-      LSBFirstBitfields = true;
+      // The Xbox 360 (Xenon) MS compiler, like MSVC, allocates bit-fields
+      // most-significant-bit first by default -- which already matches clang's
+      // default big-endian order -- so the target default is left MSB-first
+      // (LSBFirstBitfields stays false). The MS headers that want x86/LSB order
+      // (d3d9gpu.h's GPUTEXTURE_FETCH_CONSTANT, xnamath.h, fxl.h, ...) opt in
+      // per record with #pragma bitfield_order(lsb_to_msb), which tags those
+      // records with LSBFirstBitfieldAttr so only they are laid out LSB-first.
     }
     HasStrictFP = true;
     HasIbm128 = true;

@@ -72,6 +72,12 @@ struct PragmaMSStructHandler : public PragmaHandler {
                     Token &FirstToken) override;
 };
 
+struct PragmaBitfieldOrderHandler : public PragmaHandler {
+  explicit PragmaBitfieldOrderHandler() : PragmaHandler("bitfield_order") {}
+  void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                    Token &FirstToken) override;
+};
+
 struct PragmaUnusedHandler : public PragmaHandler {
   PragmaUnusedHandler() : PragmaHandler("unused") {}
   void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
@@ -435,6 +441,9 @@ void Parser::initializePragmaHandlers() {
   MSStructHandler = std::make_unique<PragmaMSStructHandler>();
   PP.AddPragmaHandler(MSStructHandler.get());
 
+  BitfieldOrderHandler = std::make_unique<PragmaBitfieldOrderHandler>();
+  PP.AddPragmaHandler(BitfieldOrderHandler.get());
+
   UnusedHandler = std::make_unique<PragmaUnusedHandler>();
   PP.AddPragmaHandler(UnusedHandler.get());
 
@@ -590,6 +599,9 @@ void Parser::resetPragmaHandlers() {
   PackHandler.reset();
   PP.RemovePragmaHandler(MSStructHandler.get());
   MSStructHandler.reset();
+
+  PP.RemovePragmaHandler(BitfieldOrderHandler.get());
+  BitfieldOrderHandler.reset();
   PP.RemovePragmaHandler(UnusedHandler.get());
   UnusedHandler.reset();
   PP.RemovePragmaHandler(WeakHandler.get());
@@ -758,6 +770,14 @@ void Parser::HandlePragmaMSStruct() {
   PragmaMSStructKind Kind = static_cast<PragmaMSStructKind>(
       reinterpret_cast<uintptr_t>(Tok.getAnnotationValue()));
   Actions.ActOnPragmaMSStruct(Kind);
+  ConsumeAnnotationToken();
+}
+
+void Parser::HandlePragmaBitfieldOrder() {
+  assert(Tok.is(tok::annot_pragma_bitfield_order));
+  PragmaBitfieldOrderKind Kind = static_cast<PragmaBitfieldOrderKind>(
+      reinterpret_cast<uintptr_t>(Tok.getAnnotationValue()));
+  Actions.ActOnPragmaBitfieldOrder(Kind, Tok.getLocation());
   ConsumeAnnotationToken();
 }
 
@@ -2383,6 +2403,70 @@ void PragmaMSStructHandler::HandlePragma(Preprocessor &PP,
   Toks[0].setAnnotationEndLoc(EndLoc);
   Toks[0].setAnnotationValue(reinterpret_cast<void*>(
                              static_cast<uintptr_t>(Kind)));
+  PP.EnterTokenStream(Toks, /*DisableMacroExpansion=*/true,
+                      /*IsReinject=*/false);
+}
+
+// #pragma bitfield_order(lsb_to_msb | msb_to_lsb | push | pop)
+void PragmaBitfieldOrderHandler::HandlePragma(Preprocessor &PP,
+                                              PragmaIntroducer Introducer,
+                                              Token &BitfieldOrderTok) {
+  SourceLocation PragmaLoc = BitfieldOrderTok.getLocation();
+
+  Token Tok;
+  PP.Lex(Tok);
+  if (Tok.isNot(tok::l_paren)) {
+    PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_lparen)
+        << "bitfield_order";
+    return;
+  }
+
+  PP.Lex(Tok);
+  if (Tok.isNot(tok::identifier)) {
+    PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_identifier)
+        << "bitfield_order";
+    return;
+  }
+
+  PragmaBitfieldOrderKind Kind;
+  const IdentifierInfo *II = Tok.getIdentifierInfo();
+  if (II->isStr("lsb_to_msb"))
+    Kind = PBOK_LsbToMsb;
+  else if (II->isStr("msb_to_lsb"))
+    Kind = PBOK_MsbToLsb;
+  else if (II->isStr("push"))
+    Kind = PBOK_Push;
+  else if (II->isStr("pop"))
+    Kind = PBOK_Pop;
+  else {
+    PP.Diag(Tok.getLocation(), diag::warn_pragma_invalid_action)
+        << "bitfield_order";
+    return;
+  }
+  SourceLocation EndLoc = Tok.getLocation();
+
+  PP.Lex(Tok);
+  if (Tok.isNot(tok::r_paren)) {
+    PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_rparen)
+        << "bitfield_order";
+    return;
+  }
+
+  PP.Lex(Tok);
+  if (Tok.isNot(tok::eod)) {
+    PP.Diag(Tok.getLocation(), diag::warn_pragma_extra_tokens_at_eol)
+        << "bitfield_order";
+    return;
+  }
+
+  MutableArrayRef<Token> Toks(PP.getPreprocessorAllocator().Allocate<Token>(1),
+                              1);
+  Toks[0].startToken();
+  Toks[0].setKind(tok::annot_pragma_bitfield_order);
+  Toks[0].setLocation(PragmaLoc);
+  Toks[0].setAnnotationEndLoc(EndLoc);
+  Toks[0].setAnnotationValue(
+      reinterpret_cast<void *>(static_cast<uintptr_t>(Kind)));
   PP.EnterTokenStream(Toks, /*DisableMacroExpansion=*/true,
                       /*IsReinject=*/false);
 }

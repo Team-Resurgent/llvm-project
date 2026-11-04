@@ -91,6 +91,11 @@ void Sema::AddMsStructLayoutForRecord(RecordDecl *RD) {
   if (MSStructPragmaOn)
     RD->addAttr(MSStructAttr::CreateImplicit(Context));
 
+  // Under #pragma bitfield_order(lsb_to_msb), lay this record's bit-fields out
+  // least-significant-bit first even on a big-endian target.
+  if (BitfieldOrderLSBFirst)
+    RD->addAttr(LSBFirstBitfieldAttr::CreateImplicit(Context));
+
   // FIXME: We should merge AddAlignmentAttributesForRecord with
   // AddMsStructLayoutForRecord into AddPragmaAttributesForRecord, which takes
   // all active pragmas and applies them as attributes to class definitions.
@@ -658,6 +663,29 @@ void Sema::DiagnoseUnterminatedPragmaAlignPack() {
 
 void Sema::ActOnPragmaMSStruct(PragmaMSStructKind Kind) {
   MSStructPragmaOn = (Kind == PMSST_ON);
+}
+
+void Sema::ActOnPragmaBitfieldOrder(PragmaBitfieldOrderKind Kind,
+                                    SourceLocation PragmaLoc) {
+  switch (Kind) {
+  case PBOK_LsbToMsb:
+    BitfieldOrderLSBFirst = true;
+    break;
+  case PBOK_MsbToLsb:
+    BitfieldOrderLSBFirst = false;
+    break;
+  case PBOK_Push:
+    BitfieldOrderStack.push_back(BitfieldOrderLSBFirst);
+    break;
+  case PBOK_Pop:
+    // A pop with nothing pushed leaves the current order unchanged.
+    if (BitfieldOrderStack.empty())
+      Diag(PragmaLoc, diag::warn_pragma_pop_failed)
+          << "bitfield_order" << "stack empty";
+    else
+      BitfieldOrderLSBFirst = BitfieldOrderStack.pop_back_val();
+    break;
+  }
 }
 
 void Sema::ActOnPragmaMSComment(SourceLocation CommentLoc,
