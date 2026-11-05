@@ -126,6 +126,23 @@ public:
   typedef char mask;
   // In case char is signed, static_cast is needed to avoid warning on
   // positive value becomming negative.
+#    ifdef __CTYPE_UPPER
+  // picolibc always provides the canonical __CTYPE_* mask names, and on some
+  // targets does not expose the legacy single-letter _U.._X aliases -- on the
+  // Xbox 360 they are suppressed so they do not collide with XDK headers that
+  // use _X/_Y as identifiers (float.h's _chgsign(double _X)). Use the canonical
+  // names; they have the same values as the legacy ones, so this is ABI-neutral.
+  static const mask space  = static_cast<mask>(__CTYPE_SPACE);
+  static const mask print  = static_cast<mask>(__CTYPE_PUNCT | __CTYPE_UPPER | __CTYPE_LOWER | __CTYPE_DIGIT | __CTYPE_BLANK);
+  static const mask cntrl  = static_cast<mask>(__CTYPE_CNTRL);
+  static const mask upper  = static_cast<mask>(__CTYPE_UPPER);
+  static const mask lower  = static_cast<mask>(__CTYPE_LOWER);
+  static const mask alpha  = static_cast<mask>(__CTYPE_UPPER | __CTYPE_LOWER);
+  static const mask digit  = static_cast<mask>(__CTYPE_DIGIT);
+  static const mask punct  = static_cast<mask>(__CTYPE_PUNCT);
+  static const mask xdigit = static_cast<mask>(__CTYPE_HEX | __CTYPE_DIGIT);
+  static const mask blank  = static_cast<mask>(__CTYPE_BLANK);
+#    else
   static const mask space  = static_cast<mask>(_S);
   static const mask print  = static_cast<mask>(_P | _U | _L | _N | _B);
   static const mask cntrl  = static_cast<mask>(_C);
@@ -136,6 +153,7 @@ public:
   static const mask punct  = static_cast<mask>(_P);
   static const mask xdigit = static_cast<mask>(_X | _N);
   static const mask blank  = static_cast<mask>(_B);
+#    endif
   // mask is already fully saturated, use a different type in regex_type_traits.
   static const unsigned short __regex_word = 0x100;
 #    define _LIBCPP_CTYPE_MASK_IS_COMPOSITE_PRINT
