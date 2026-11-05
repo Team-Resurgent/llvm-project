@@ -4240,6 +4240,40 @@ static bool CalculateStackSlotUsed(EVT ArgVT, EVT OrigVT, ISD::ArgFlagsTy Flags,
   return UseMemory;
 }
 
+// The Xbox 360's platform compiler is MSVC, which passes a by-value aggregate
+// larger than a doubleword with its START 16-byte aligned in the parameter
+// save area: it inserts padding before the aggregate, while the aggregate's
+// own size is only rounded up to a doubleword.  clang links against the
+// precompiled MSVC XDK/kernel libraries, so arguments that follow such an
+// aggregate must land where MSVC places them.  Crucially, that alignment
+// padding does NOT consume a general-purpose register (the aggregate still
+// begins in the next available GPR); the GPR index is therefore computed from
+// a separate, un-padded offset (tracked by the caller as "Xbox360AggPad").
+//
+// A multi-register array-coerced aggregate appears as a run of "consecutive
+// registers" pieces (all array elements share the InConsecutiveRegs flag, the
+// last also InConsecutiveRegsLast); the pieces are not marked "split" because
+// each array element is its own one-register value.  A > 64-byte aggregate is
+// passed byval instead.  `PrevConsecutiveContinues` is true iff the previous
+// argument was a non-final piece of such a run, so the test below fires only
+// on the first piece.  Floating/vector homogeneous aggregates are excluded:
+// they are passed in FPRs/VRs, not GPRs (and the Xbox 360 target does not use
+// the ELFv2 float-HFA rule at all).
+static bool isXbox360Aggregate16ByteStart(EVT ArgVT, ISD::ArgFlagsTy Flags,
+                                          bool PrevConsecutiveContinues,
+                                          unsigned PtrByteSize) {
+  if (Flags.isByVal())
+    return Flags.getByValSize() > PtrByteSize;
+  return Flags.isInConsecutiveRegs() && !PrevConsecutiveContinues &&
+         !Flags.isInConsecutiveRegsLast() && ArgVT.isInteger();
+}
+
+// True iff this argument is a non-final piece of a consecutive-registers run,
+// i.e. the next argument continues the same by-value aggregate.
+static bool xbox360ConsecutiveContinues(ISD::ArgFlagsTy Flags) {
+  return Flags.isInConsecutiveRegs() && !Flags.isInConsecutiveRegsLast();
+}
+
 /// EnsureStackAlignment - Round stack frame size up from NumBytes to
 /// ensure minimum alignment required for target.
 static unsigned EnsureStackAlignment(const PPCFrameLowering *Lowering,
@@ -4605,6 +4639,12 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
 
   unsigned ArgOffset = LinkageSize;
   unsigned GPR_idx = 0, FPR_idx = 0, VR_idx = 0;
+  // Xbox 360: a by-value aggregate > 8 bytes is 16-aligned in the save area,
+  // but that alignment padding does not consume a GPR.  Accumulate the padding
+  // so the GPR index is derived from a dense (un-padded) offset, and remember
+  // whether the previous argument was a non-final piece of such an aggregate.
+  unsigned Xbox360AggPad = 0;
+  bool Xbox360PrevConsecutiveContinues = false;
   SmallVector<SDValue, 8> MemOps;
   Function::const_arg_iterator FuncArg = MF.getFunction().arg_begin();
   unsigned CurArgIdx = 0;
@@ -4636,10 +4676,24 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
     if (CallConv != CallingConv::Fast) {
       ComputeArgOffset();
 
+      // Xbox 360: 16-align the start of a by-value aggregate > 8 bytes, and
+      // record the padding so it is not charged against the GPR sequence.
+      if (Subtarget.isXbox360ABI() &&
+          isXbox360Aggregate16ByteStart(ObjectVT, Flags,
+                                        Xbox360PrevConsecutiveContinues,
+                                        PtrByteSize)) {
+        unsigned Aligned = alignTo(ArgOffset, 16);
+        Xbox360AggPad += Aligned - ArgOffset;
+        ArgOffset = Aligned;
+        CurArgOffset = ArgOffset;
+      }
+
       /* Compute GPR index associated with argument offset.  */
-      GPR_idx = (ArgOffset - LinkageSize) / PtrByteSize;
+      GPR_idx = (ArgOffset - Xbox360AggPad - LinkageSize) / PtrByteSize;
       GPR_idx = std::min(GPR_idx, Num_GPR_Regs);
     }
+    if (Subtarget.isXbox360ABI())
+      Xbox360PrevConsecutiveContinues = xbox360ConsecutiveContinues(Flags);
 
     // FIXME the codegen can be much improved in some cases.
     // We do not have to keep everything in memory.
@@ -4904,7 +4958,9 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
     // If this function is vararg, store any remaining integer argument regs
     // to their spots on the stack so that they may be loaded by dereferencing
     // the result of va_next.
-    for (GPR_idx = (ArgOffset - LinkageSize) / PtrByteSize;
+    // Subtract any Xbox 360 aggregate 16-alignment padding so the first unused
+    // GPR is found densely (the padding consumed no register).
+    for (GPR_idx = (ArgOffset - Xbox360AggPad - LinkageSize) / PtrByteSize;
          GPR_idx < Num_GPR_Regs; ++GPR_idx) {
       Register VReg = MF.addLiveIn(GPR[GPR_idx], &PPC::G8RCRegClass);
       // The vararg save area uses 8-byte (register-width) slots. Store the full
@@ -6385,6 +6441,10 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
   unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
   unsigned NumBytes = LinkageSize;
   unsigned GPR_idx = 0, FPR_idx = 0, VR_idx = 0;
+  // Xbox 360: the by-value-aggregate 16-alignment (see
+  // isXbox360Aggregate16ByteStart) must be reflected in the reserved parameter
+  // area size so arguments after such an aggregate have their stack slots.
+  bool Xbox360PrepassPrevConsecutiveContinues = false;
 
   static const MCPhysReg GPR[] = {
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
@@ -6476,6 +6536,14 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
     auto Alignement =
         CalculateStackSlotAlignment(ArgVT, OrigVT, Flags, PtrByteSize);
     NumBytes = alignTo(NumBytes, Alignement);
+    if (Subtarget.isXbox360ABI()) {
+      if (isXbox360Aggregate16ByteStart(ArgVT, Flags,
+                                        Xbox360PrepassPrevConsecutiveContinues,
+                                        PtrByteSize))
+        NumBytes = alignTo(NumBytes, 16);
+      Xbox360PrepassPrevConsecutiveContinues =
+          xbox360ConsecutiveContinues(Flags);
+    }
 
     NumBytes += CalculateStackSlotSize(ArgVT, Flags, PtrByteSize);
     if (Flags.isInConsecutiveRegsLast())
@@ -6534,6 +6602,11 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
   // must be stored to our stack, and loaded into integer regs as well, if
   // any integer regs are available for argument passing.
   unsigned ArgOffset = LinkageSize;
+  // See LowerFormalArguments_64SVR4 / isXbox360Aggregate16ByteStart: 16-align a
+  // by-value aggregate > 8 bytes in the save area, keeping the GPR sequence
+  // dense by tracking the alignment padding.
+  unsigned Xbox360AggPad = 0;
+  bool Xbox360PrevConsecutiveContinues = false;
 
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
   SmallVector<TailCallArgumentInfo, 8> TailCallArguments;
@@ -6571,10 +6644,27 @@ SDValue PPCTargetLowering::LowerCall_64SVR4(
     if (!IsFastCall) {
       ComputePtrOff();
 
+      // Xbox 360: 16-align the start of a by-value aggregate > 8 bytes and
+      // rebuild PtrOff at the bumped offset; record the padding so it is not
+      // charged against the GPR sequence.
+      if (Subtarget.isXbox360ABI() &&
+          isXbox360Aggregate16ByteStart(ArgVT, Flags,
+                                        Xbox360PrevConsecutiveContinues,
+                                        PtrByteSize)) {
+        unsigned Aligned = alignTo(ArgOffset, 16);
+        Xbox360AggPad += Aligned - ArgOffset;
+        ArgOffset = Aligned;
+        PtrOff = DAG.getConstant(ArgOffset, dl, StackPtr.getValueType());
+        PtrOff = DAG.getNode(ISD::ADD, dl, StackPtr.getValueType(), StackPtr,
+                             PtrOff);
+      }
+
       /* Compute GPR index associated with argument offset.  */
-      GPR_idx = (ArgOffset - LinkageSize) / PtrByteSize;
+      GPR_idx = (ArgOffset - Xbox360AggPad - LinkageSize) / PtrByteSize;
       GPR_idx = std::min(GPR_idx, NumGPRs);
     }
+    if (Subtarget.isXbox360ABI())
+      Xbox360PrevConsecutiveContinues = xbox360ConsecutiveContinues(Flags);
 
     // Promote integers to 64-bit values.
     if (Arg.getValueType() == MVT::i32 || Arg.getValueType() == MVT::i1) {
