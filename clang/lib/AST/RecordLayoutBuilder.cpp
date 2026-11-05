@@ -3484,7 +3484,16 @@ ASTContext::getASTRecordLayout(const RecordDecl *D) const {
       // In certain situations, we are allowed to lay out objects in the
       // tail-padding of base classes.  This is ABI-dependent.
       // FIXME: this should be stored in the record layout.
+      //
+      // The Xbox 360's platform compiler is MSVC, which never reuses a base
+      // class's tail padding for a derived class's members (that behavior is
+      // baked into the Microsoft record layout via nvsize == size).  The
+      // Xbox 360 target keeps the Itanium C++ ABI but links against the
+      // MS-compiled XDK/kernel libraries, so a class derived from a non-POD
+      // base must get the same layout MSVC produced.  Always skip tail
+      // padding there, as if every base were POD for layout purposes.
       bool skipTailPadding =
+          getTargetInfo().getTriple().getOS() == llvm::Triple::Xbox360 ||
           mustSkipTailPadding(getTargetInfo().getCXXABI(), RD);
 
       // FIXME: This should be done in FinalizeLayout.
