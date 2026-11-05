@@ -75,8 +75,14 @@ Symbol *SymbolTable::insert(StringRef name) {
   // so distinct overloads collide (spurious duplicate-symbol errors, and worse,
   // silent mis-resolution). This target reuses MSVC-mangled COFF libraries as
   // ELF and never uses ELF symbol versioning, so disable the @@ split.
+  //
+  // The Xbox 360 target is 64-bit PowerPC (EM_PPC64, ELFv2); match EM_PPC too
+  // so the guard still holds on the legacy 32-bit path. This fork only ever
+  // targets the Xbox 360, so suppressing @-versioning for PPC/PPC64 is safe.
   StringRef stem = name;
-  size_t pos = ctx.arg.emachine == EM_PPC ? StringRef::npos : name.find('@');
+  size_t pos = (ctx.arg.emachine == EM_PPC || ctx.arg.emachine == EM_PPC64)
+                   ? StringRef::npos
+                   : name.find('@');
   if (pos != StringRef::npos && pos + 1 < name.size() && name[pos + 1] == '@')
     stem = name.take_front(pos);
 
