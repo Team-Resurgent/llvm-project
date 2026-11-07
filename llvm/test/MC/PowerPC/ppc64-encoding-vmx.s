@@ -643,6 +643,12 @@
 # CHECK-BE: vnmsubfp 2, 3, 4, 5             # encoding: [0x10,0x43,0x29,0x2f]
 # CHECK-LE: vnmsubfp 2, 3, 4, 5             # encoding: [0x2f,0x29,0x43,0x10]
             vnmsubfp 2, 3, 4, 5
+# CHECK-BE: vmsum3fp128 2, 3, 4             # encoding: [0x14,0x43,0x21,0x90]
+# CHECK-LE: vmsum3fp128 2, 3, 4             # encoding: [0x90,0x21,0x43,0x14]
+            vmsum3fp128 2, 3, 4
+# CHECK-BE: vmsum4fp128 2, 3, 4             # encoding: [0x14,0x43,0x21,0xd0]
+# CHECK-LE: vmsum4fp128 2, 3, 4             # encoding: [0xd0,0x21,0x43,0x14]
+            vmsum4fp128 2, 3, 4
 
 # CHECK-BE: vmaxfp 2, 3, 4                  # encoding: [0x10,0x43,0x24,0x0a]
 # CHECK-LE: vmaxfp 2, 3, 4                  # encoding: [0x0a,0x24,0x43,0x10]

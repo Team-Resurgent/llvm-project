@@ -494,6 +494,19 @@ def VNMSUBFP: VAForm_1<47, (outs vrrc:$RT), (ins vrrc:$RA, vrrc:$RC, vrrc:$RB),
                        [(set v4f32:$RT, (desugared_fneg (fma v4f32:$RA, v4f32:$RC,
                                                   (desugared_fneg v4f32:$RB))))]>;
 
+// VMX128 floating-point dot products (Cell/Xenon). vmsum4fp128 sums the four
+// lane products of VA and VB; vmsum3fp128 sums the first three (lanes 0..2);
+// each broadcasts the result to every lane. AltiVec has no single-instruction
+// float sum, so the Xbox 360 runtime's __vmsum4fp/__vmsum3fp intrinsics emit
+// these via inline asm; they are assembler-only here (no ISel pattern) so
+// adding them changes no automatic codegen for any target. The xo values
+// (0x1D0 / 0x190) match MSVC's encodings (verified against stock XDK library
+// disassembly).
+def VMSUM3FP128 : VMX128Form_3VR<0x190, (outs vrrc:$VD), (ins vrrc:$VA, vrrc:$VB),
+                       "vmsum3fp128 $VD, $VA, $VB", IIC_VecFP, []>;
+def VMSUM4FP128 : VMX128Form_3VR<0x1D0, (outs vrrc:$VD), (ins vrrc:$VA, vrrc:$VB),
+                       "vmsum4fp128 $VD, $VA, $VB", IIC_VecFP, []>;
+
 let hasSideEffects = 1 in {
   def VMHADDSHS  : VA1a_Int_Ty<32, "vmhaddshs", int_ppc_altivec_vmhaddshs, v8i16>;
   def VMHRADDSHS : VA1a_Int_Ty<33, "vmhraddshs", int_ppc_altivec_vmhraddshs,

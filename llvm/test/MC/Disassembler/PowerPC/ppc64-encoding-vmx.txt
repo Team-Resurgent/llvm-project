@@ -585,7 +585,13 @@
 # CHECK: vnmsubfp 2, 3, 4, 5             
 0x10 0x43 0x29 0x2f
 
-# CHECK: vmaxfp 2, 3, 4                  
+# CHECK: vmsum3fp128 2, 3, 4
+0x14 0x43 0x21 0x90
+
+# CHECK: vmsum4fp128 2, 3, 4
+0x14 0x43 0x21 0xd0
+
+# CHECK: vmaxfp 2, 3, 4
 0x10 0x43 0x24 0x0a
 
 # CHECK: vminfp 2, 3, 4                  

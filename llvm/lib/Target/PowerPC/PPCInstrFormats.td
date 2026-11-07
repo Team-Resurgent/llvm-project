@@ -2100,6 +2100,28 @@ class VXForm_setzero<bits<11> xo, dag OOL, dag IOL, string asmstr,
 }
 
 
+// VMX128 (Xenon) three-source VX-like form in primary opcode 5. The real VMX128
+// register fields are 7 bits, with the two high bits of each operand scattered
+// into the low opcode field; the Xbox 360 runtime only ever uses VR0-VR31, so
+// those high bits are always 0 and the encoding reduces to a VX-form in opcode 5
+// with three 5-bit vector register fields. Assembler-only (used by the runtime's
+// __vmsum3fp/__vmsum4fp intrinsics via inline asm); callers that need VR32-VR127
+// are not modeled.
+class VMX128Form_3VR<bits<11> xo, dag OOL, dag IOL, string asmstr,
+                     InstrItinClass itin, list<dag> pattern>
+    : I<5, OOL, IOL, asmstr, itin> {
+  bits<5> VD;
+  bits<5> VA;
+  bits<5> VB;
+
+  let Pattern = pattern;
+
+  let Inst{6...10}  = VD;
+  let Inst{11...15} = VA;
+  let Inst{16...20} = VB;
+  let Inst{21...31} = xo;
+}
+
 class VXForm_2<bits<11> xo, dag OOL, dag IOL, string asmstr,
                InstrItinClass itin, list<dag> pattern>
     : I<4, OOL, IOL, asmstr, itin> {
