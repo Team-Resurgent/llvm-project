@@ -436,6 +436,14 @@ def LVX  : XForm_1_memOp<31, 103, (outs vrrc:$RST), (ins (memrr $RA, $RB):$addr)
 def LVXL : XForm_1_memOp<31, 359, (outs vrrc:$RST), (ins (memrr $RA, $RB):$addr),
                    "lvxl $RST, $addr", IIC_LdStLoad,
                    [(set v4i32:$RST, (int_ppc_altivec_lvxl ForceXForm:$addr))]>;
+// Partial (left/right-indexed) vector loads. These are the Cell/Xenon VMX
+// "load vector left/right indexed" forms. They are assembler-only here (no
+// ISel pattern), so adding them changes no automatic codegen for any target;
+// the Xbox 360 runtime's __lvlx/__lvrx intrinsics emit them via inline asm.
+def LVLX : XForm_1_memOp<31, 519, (outs vrrc:$RST), (ins (memrr $RA, $RB):$addr),
+                   "lvlx $RST, $addr", IIC_LdStLoad, []>;
+def LVRX : XForm_1_memOp<31, 551, (outs vrrc:$RST), (ins (memrr $RA, $RB):$addr),
+                   "lvrx $RST, $addr", IIC_LdStLoad, []>;
 }
 
 def LVSL : XForm_1_memOp<31,   6, (outs vrrc:$RST), (ins (memrr $RA, $RB):$addr),
@@ -463,6 +471,13 @@ def STVX  : XForm_8_memOp<31, 231, (outs), (ins vrrc:$RST, (memrr $RA, $RB):$add
 def STVXL : XForm_8_memOp<31, 487, (outs), (ins vrrc:$RST, (memrr $RA, $RB):$addr),
                    "stvxl $RST, $addr", IIC_LdStStore,
                    [(int_ppc_altivec_stvxl v4i32:$RST, ForceXForm:$addr)]>;
+// Partial (left/right-indexed) vector stores. Cell/Xenon VMX "store vector
+// left/right indexed". Assembler-only (no ISel pattern); the Xbox 360 runtime's
+// __stvlx/__stvrx intrinsics emit them via inline asm.
+def STVLX : XForm_8_memOp<31, 647, (outs), (ins vrrc:$RST, (memrr $RA, $RB):$addr),
+                   "stvlx $RST, $addr", IIC_LdStStore, []>;
+def STVRX : XForm_8_memOp<31, 679, (outs), (ins vrrc:$RST, (memrr $RA, $RB):$addr),
+                   "stvrx $RST, $addr", IIC_LdStStore, []>;
 }
 
 let PPC970_Unit = 5 in {  // VALU Operations.

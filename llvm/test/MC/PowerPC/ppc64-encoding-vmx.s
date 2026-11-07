@@ -21,6 +21,12 @@
 # CHECK-BE: lvxl 2, 3, 4                    # encoding: [0x7c,0x43,0x22,0xce]
 # CHECK-LE: lvxl 2, 3, 4                    # encoding: [0xce,0x22,0x43,0x7c]
             lvxl 2, 3, 4
+# CHECK-BE: lvlx 2, 3, 4                    # encoding: [0x7c,0x43,0x24,0x0e]
+# CHECK-LE: lvlx 2, 3, 4                    # encoding: [0x0e,0x24,0x43,0x7c]
+            lvlx 2, 3, 4
+# CHECK-BE: lvrx 2, 3, 4                    # encoding: [0x7c,0x43,0x24,0x4e]
+# CHECK-LE: lvrx 2, 3, 4                    # encoding: [0x4e,0x24,0x43,0x7c]
+            lvrx 2, 3, 4
 # CHECK-BE: stvebx 2, 3, 4                  # encoding: [0x7c,0x43,0x21,0x0e]
 # CHECK-LE: stvebx 2, 3, 4                  # encoding: [0x0e,0x21,0x43,0x7c]
             stvebx 2, 3, 4
@@ -36,6 +42,12 @@
 # CHECK-BE: stvxl 2, 3, 4                   # encoding: [0x7c,0x43,0x23,0xce]
 # CHECK-LE: stvxl 2, 3, 4                   # encoding: [0xce,0x23,0x43,0x7c]
             stvxl 2, 3, 4
+# CHECK-BE: stvlx 2, 3, 4                   # encoding: [0x7c,0x43,0x25,0x0e]
+# CHECK-LE: stvlx 2, 3, 4                   # encoding: [0x0e,0x25,0x43,0x7c]
+            stvlx 2, 3, 4
+# CHECK-BE: stvrx 2, 3, 4                   # encoding: [0x7c,0x43,0x25,0x4e]
+# CHECK-LE: stvrx 2, 3, 4                   # encoding: [0x4e,0x25,0x43,0x7c]
+            stvrx 2, 3, 4
 # CHECK-BE: lvsl 2, 3, 4                    # encoding: [0x7c,0x43,0x20,0x0c]
 # CHECK-LE: lvsl 2, 3, 4                    # encoding: [0x0c,0x20,0x43,0x7c]
             lvsl 2, 3, 4

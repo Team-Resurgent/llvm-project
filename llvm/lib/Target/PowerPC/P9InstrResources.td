@@ -718,6 +718,7 @@ def : InstRW<[P9_LS_5C, IP_AGEN_1C, DISP_1C],
       (instrs
     (instregex "LVE(B|H|W)X$"),
     (instregex "LVX(L)?"),
+    (instregex "LV(L|R)X$"),
     (instregex "LXSI(B|H)ZX$"),
     LXSDX,
     LXVB16X,
@@ -915,6 +916,7 @@ def : InstRW<[P9_LS_1C, IP_EXECE_1C, IP_EXECO_1C, IP_AGEN_1C, DISP_1C],
       (instrs
     (instregex "STVE(B|H|W)X$"),
     (instregex "STVX(L)?$"),
+    (instregex "STV(L|R)X$"),
     (instregex "STXV(B16X|H8X|W4X|D2X|L|LL|X)?$")
 )>;
 
