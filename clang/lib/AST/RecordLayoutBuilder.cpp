@@ -2033,6 +2033,26 @@ void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
     PackedFieldAlign = std::min(PackedFieldAlign, MaxFieldAlignment);
     PreferredAlign = std::min(PreferredAlign, MaxFieldAlignment);
     UnpackedFieldAlign = std::min(UnpackedFieldAlign, MaxFieldAlignment);
+
+    // The Xbox 360's platform compiler is MSVC, where #pragma pack does NOT
+    // reduce a member's EXPLICIT alignment -- neither an __declspec(align(N))
+    // on the field itself nor one on its (record/typedef) type.  MSVC uses
+    // max(pack, explicit-align); clang's Itanium layout uses min, which shrinks
+    // e.g. an __declspec(align(16)) XMVECTOR member under pshpack8 from 16 to 8
+    // and makes NUI_SKELETON_DATA 0x1B8 instead of the MS-compiled XDK's 0x1C0.
+    // The Xbox 360 target links against those MS-built libraries, so restore the
+    // explicit-alignment floor after the #pragma pack cap.  Generic PowerPC is
+    // unchanged.
+    if (Context.getTargetInfo().getTriple().getOS() == llvm::Triple::Xbox360) {
+      CharUnits ExplicitAlign = MaxAlignmentInChars;
+      if (AlignRequirement == AlignRequirementKind::RequiredByRecord ||
+          AlignRequirement == AlignRequirementKind::RequiredByTypedef ||
+          AlignRequirement == AlignRequirementKind::RequiredByEnum)
+        ExplicitAlign = std::max(ExplicitAlign, FieldAlign);
+      PackedFieldAlign = std::max(PackedFieldAlign, ExplicitAlign);
+      PreferredAlign = std::max(PreferredAlign, ExplicitAlign);
+      UnpackedFieldAlign = std::max(UnpackedFieldAlign, ExplicitAlign);
+    }
   }
 
 
