@@ -91,6 +91,17 @@ def RetCC_PPC : CallingConv<[
            CCIfSubtarget<"hasAltivec()",
            CCAssignToReg<[V2, V3, V4, V5, V6, V7, V8, V9]>>>,
 
+  // The Xbox 360's platform compiler is MSVC, which returns the first vector in
+  // v1, not v2 (its vector arg/return registers are numbered v1..v13).  The
+  // argument side already begins at v1 (see getVRArgRegs); match it on the
+  // return side so a by-value __vector4/XMVECTOR returned by a clang function
+  // and read by the MS-compiled XDK (and vice versa) agree.  Generic PowerPC
+  // returns in v2 as before.
+  CCIfType<[v16i8, v8i16, v4i32, v2i64, v1i128, v4f32, v2f64],
+           CCIf<"State.getMachineFunction().getSubtarget<PPCSubtarget>().isXbox360ABI()",
+           CCAssignToReg<[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12,
+                          V13]>>>,
+
   // Vector types returned as "direct" go into V2 .. V9; note that only the
   // ELFv2 ABI fully utilizes all these registers.
   CCIfType<[v16i8, v8i16, v4i32, v2i64, v1i128, v4f32, v2f64],

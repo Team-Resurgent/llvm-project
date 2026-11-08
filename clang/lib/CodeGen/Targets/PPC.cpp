@@ -875,9 +875,51 @@ bool PPC64_SVR4_ABIInfo::isHomogeneousAggregateSmallEnough(
   return Members * NumRegs <= 8;
 }
 
+// Xbox 360 only: find a 128-bit vector field inside a record/union, searching
+// recursively through nested records/unions.  Used to recognize the XDK's
+// __vector4 / XMVECTOR, which RXDK-360 defines as a 16-byte union wrapping a
+// native 128-bit vector (plus float/int array members for element access).
+static const VectorType *findXbox360VectorField(const RecordDecl *RD,
+                                                 ASTContext &Ctx) {
+  for (const FieldDecl *FD : RD->fields()) {
+    QualType FT = FD->getType();
+    if (const VectorType *VT = FT->getAs<VectorType>()) {
+      if (Ctx.getTypeSize(VT) == 128)
+        return VT;
+    } else if (const RecordType *RT = FT->getAs<RecordType>()) {
+      if (const VectorType *VT = findXbox360VectorField(RT->getDecl(), Ctx))
+        return VT;
+    }
+  }
+  return nullptr;
+}
+
+// Xbox 360 only: a "__vector4-shaped" aggregate is a 16-byte record/union that
+// wraps a 128-bit vector.  MSVC declares XMVECTOR with __declspec(intrin_type),
+// so it is register-resident -- passed and returned in a vector register like a
+// bare __vector128.  clang's generic PPC64 ABI, not seeing the union as a vector
+// type and finding it non-homogeneous (mixed vector + scalar-array members),
+// otherwise passes it in a GPR pair, corrupting every by-value XMVECTOR exchanged
+// with the MS-compiled XDK (e.g. NuiTransformMatrixLevel, NuiHandles*).
+static const VectorType *getXbox360VectorWrapper(QualType Ty,
+                                                  ASTContext &Ctx) {
+  const RecordType *RT = Ty->getAs<RecordType>();
+  if (!RT || Ctx.getTypeSize(Ty) != 128)
+    return nullptr;
+  return findXbox360VectorField(RT->getDecl(), Ctx);
+}
+
 ABIArgInfo
 PPC64_SVR4_ABIInfo::classifyArgumentType(QualType Ty) const {
   Ty = useFirstFieldIfTransparentUnion(Ty);
+
+  // Xbox 360: pass a __vector4-shaped union (XMVECTOR) in a vector register,
+  // matching MSVC's __declspec(intrin_type) convention, instead of the GPR pair
+  // clang's generic PPC64 ABI would otherwise use for a non-homogeneous
+  // 16-byte aggregate.
+  if (getTarget().getTriple().getOS() == llvm::Triple::Xbox360)
+    if (const VectorType *VT = getXbox360VectorWrapper(Ty, getContext()))
+      return ABIArgInfo::getDirect(CGT.ConvertType(QualType(VT, 0)));
 
   if (Ty->isAnyComplexType())
     return ABIArgInfo::getDirect();
@@ -962,6 +1004,13 @@ PPC64_SVR4_ABIInfo::classifyReturnType(QualType RetTy) const {
 
   if (RetTy->isAnyComplexType())
     return ABIArgInfo::getDirect();
+
+  // Xbox 360: return a __vector4-shaped union (XMVECTOR) in a vector register,
+  // matching MSVC's __declspec(intrin_type) convention, instead of the GPR
+  // pair clang's generic PPC64 ABI would use for a non-homogeneous aggregate.
+  if (getTarget().getTriple().getOS() == llvm::Triple::Xbox360)
+    if (const VectorType *VT = getXbox360VectorWrapper(RetTy, getContext()))
+      return ABIArgInfo::getDirect(CGT.ConvertType(QualType(VT, 0)));
 
   // Non-Altivec vector types are returned in GPRs (smaller than 16 bytes)
   // or via reference (larger than 16 bytes).
